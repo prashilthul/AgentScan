@@ -424,4 +424,19 @@ def extract(wl: Workload, snap: AccountSnapshot, role_shared: bool = False) -> l
     _declared(b, snap)
     _observed(b, snap, role_shared)
     _behavioral(b, snap)
-    return b.items
+    return reconcile(b.items)
+
+
+def reconcile(evidence: list[Evidence]) -> list[Evidence]:
+    """Resolve evidence that only means something in context.
+
+    "Bedrock permission unused" only says Bedrock is unused. If LLM usage is seen through
+    another channel (direct API calls in logs, traces), it must not count against "uses AI".
+    It stays in the trail, neutralised, so an auditor still sees the stale permission.
+    """
+    used_elsewhere = any(e.ai_weight > 0 and e.tier is not Tier.DECLARED for e in evidence)
+    for e in evidence:
+        if e.signal == "cloudtrail.permission_unused" and used_elsewhere and e.ai_weight:
+            e.ai_weight = 0.0
+            e.detail += " Not counted: LLM usage observed through another channel."
+    return evidence
