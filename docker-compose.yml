@@ -1,0 +1,23 @@
+# Local stand-in for the client's AWS account + its observability stack.
+#   moto            -> fake AWS control plane (metadata, CloudTrail S3, CloudWatch Logs)
+#   otel-collector  -> receives OTLP from the lab workloads (like ADOT on AWS)
+#   jaeger          -> trace store the crawler queries (stands in for X-Ray)
+services:
+  moto:
+    image: motoserver/moto:5.1.4
+    ports: ["5000:5000"]
+    environment:
+      MOTO_PORT: "5000"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    ports: ["16686:16686"]          # UI + query API
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./infra/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4318:4318"]            # OTLP/HTTP in
+    depends_on: [jaeger]
