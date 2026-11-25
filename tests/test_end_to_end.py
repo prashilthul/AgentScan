@@ -2,7 +2,9 @@
 SDK against a scripted model, crawl, classify, and score against ground truth."""
 
 import anthropic
+import httpx
 import httpx2
+import pytest
 
 from agentscan.aws import Aws
 from agentscan.evaluate import evaluate
@@ -11,14 +13,28 @@ from lab.run import run_workload
 from lab.seed import seed
 from lab.shim.mirror import AwsMirror
 from lab.spec import WORKLOADS
-from tests.fakes import InMemoryTraceSource, KeepSpans, scripted_model
+from tests.fakes import InMemoryTraceSource, KeepSpans, scripted_gemini, scripted_model
 
 
-def _run_lab(tmp_path):
+@pytest.fixture(params=["gemini", "anthropic"])
+def provider(request, monkeypatch):
+    monkeypatch.setenv("LAB_PROVIDER", request.param)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("LAB_MIN_INTERVAL", "0")
+    return request.param
+
+
+def _http(provider):
+    if provider == "anthropic":
+        return anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(scripted_model))
+    return httpx.Client(transport=httpx.MockTransport(scripted_gemini))
+
+
+def _run_lab(tmp_path, provider):
     state = seed(tmp_path)
     mirror = AwsMirror(state["account_id"], state["region"])
     exporter = KeepSpans()
-    http = anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(scripted_model))
+    http = _http(provider)
     for spec in WORKLOADS:
         if spec.module:
             run_workload(spec, state, mirror, span_exporter=exporter, http_client=http)
@@ -30,8 +46,8 @@ def _scan(state, exporter, disabled=()):
     return analyse(snap)
 
 
-def test_all_workloads_classified_correctly(aws, tmp_path):
-    state, exporter = _run_lab(tmp_path)
+def test_all_workloads_classified_correctly(aws, provider, tmp_path):
+    state, exporter = _run_lab(tmp_path, provider)
     report = _scan(state, exporter)
     assert all(s.ok for s in report.sources), [s for s in report.sources if not s.ok]
     res = evaluate(report, tmp_path / "ground_truth.json")
@@ -39,8 +55,8 @@ def test_all_workloads_classified_correctly(aws, tmp_path):
     assert res.accuracy == 1.0, [m.model_dump() for m in res.mistakes]
 
 
-def test_every_label_has_evidence_and_bounded_confidence(aws, tmp_path):
-    state, exporter = _run_lab(tmp_path)
+def test_every_label_has_evidence_and_bounded_confidence(aws, provider, tmp_path):
+    state, exporter = _run_lab(tmp_path, provider)
     report = _scan(state, exporter)
     for r in report.results:
         c = r.classification
@@ -51,8 +67,8 @@ def test_every_label_has_evidence_and_bounded_confidence(aws, tmp_path):
             assert e.id and e.detail and e.tier
 
 
-def test_without_traces_confidence_drops_but_labels_hold_where_logs_exist(aws, tmp_path):
-    state, exporter = _run_lab(tmp_path)
+def test_without_traces_confidence_drops_but_labels_hold_where_logs_exist(aws, provider, tmp_path):
+    state, exporter = _run_lab(tmp_path, provider)
     full = {r.workload.name: r.classification for r in _scan(state, exporter).results}
     blind = {
         r.workload.name: r.classification

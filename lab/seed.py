@@ -188,7 +188,7 @@ def seed(out_dir: Path = Path("out")) -> dict:
             }
             if spec.name in secret_arns:
                 container["secrets"] = [
-                    {"name": "ANTHROPIC_API_KEY", "valueFrom": secret_arns[spec.name]}
+                    {"name": "GEMINI_API_KEY", "valueFrom": secret_arns[spec.name]}
                 ]
             ecs.register_task_definition(
                 family=spec.name,

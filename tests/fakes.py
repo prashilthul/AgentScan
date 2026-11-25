@@ -12,6 +12,7 @@ import json
 import uuid
 from collections import defaultdict
 
+import httpx
 import httpx2
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
@@ -66,6 +67,35 @@ def scripted_model(request: httpx2.Request) -> httpx2.Response:
             "stop_reason": stop,
             "stop_sequence": None,
             "usage": {"input_tokens": 12, "output_tokens": 7},
+        },
+    )
+
+
+def scripted_gemini(request: httpx.Request) -> httpx.Response:
+    """Same behaviour as scripted_model, speaking the Gemini generateContent wire format."""
+    body = json.loads(request.content)
+    decls = [d for t in body.get("tools") or [] for d in t.get("functionDeclarations", [])]
+    rounds = sum(
+        1
+        for c in body["contents"]
+        if c.get("role") == "user" and any("functionResponse" in p for p in c.get("parts", []))
+    )
+    if decls and rounds < 2:
+        d = decls[rounds % len(decls)]
+        schema = d.get("parametersJsonSchema") or d.get("parameters") or {}
+        parts = [{"functionCall": {"name": d["name"], "args": _fill(schema)}}]
+    else:
+        parts = [{"text": "ok"}]
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}],
+            "usageMetadata": {
+                "promptTokenCount": 12,
+                "candidatesTokenCount": 7,
+                "totalTokenCount": 19,
+            },
+            "modelVersion": "gemini-2.5-flash",
         },
     )
 

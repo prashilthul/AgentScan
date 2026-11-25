@@ -85,7 +85,7 @@ class _FakeClient:
 
 def _judge(text: str) -> Judge:
     j = Judge.__new__(Judge)
-    j.model, j.threshold, j.client = "fake", 0.7, _FakeClient(text)
+    j.model, j.threshold, j.client, j.provider = "fake", 0.7, _FakeClient(text), "anthropic"
     return j
 
 

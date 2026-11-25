@@ -1,14 +1,14 @@
 """Per-workload runtime: how a real workload talks to the model, to tracing and to "AWS".
 
 Workload code only uses:
-    rt.llm(...)                 -> a real Anthropic Messages call (mirrored per rt.spec.path)
+    rt.llm(...)                 -> a real model call (Gemini or Anthropic), mirrored per rt.spec.path
     rt.agent_span(name)         -> OTel GenAI `invoke_agent` span (what agent frameworks emit)
     rt.tool_span(name)          -> OTel GenAI `execute_tool` span
     rt.span(name, **attrs)      -> any ordinary span (db query, http call, ...)
     rt.log(msg)                 -> an application log line
 
-Traced workloads hand their tracer provider to the Anthropic SDK, which then emits its own
-native `anthropic.messages.create` spans. Untraced workloads emit nothing.
+Traced workloads get OTel GenAI spans for every model call (`chat <model>` for Gemini, the
+SDK's native `anthropic.messages.create` for Anthropic). Untraced workloads emit nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-import anthropic
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -27,6 +26,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from opentelemetry.trace import SpanKind
 
 from lab.shim.mirror import AwsMirror
+from lab.shim.providers import AnthropicProvider, GeminiProvider
 from lab.spec import Spec
 
 
@@ -52,8 +52,11 @@ class Runtime:
         self.spec = spec
         self.state = state
         self.mirror = mirror
-        self.model = os.environ.get("LAB_MODEL", "claude-haiku-5-5")
-        self.bedrock_model_id = f"anthropic.{self.model}"
+        # What the simulated Bedrock route records in CloudTrail. The real inference is served
+        # by LAB_PROVIDER; Bedrock itself is part of the fake account.
+        self.bedrock_model_id = os.environ.get(
+            "SIMULATED_BEDROCK_MODEL_ID", "anthropic.claude-haiku-5-5"
+        )
         self.arn = state["arns"][spec.name]
         self.task_id = uuid.uuid4().hex[:32]
         self.request_id: str | None = None
@@ -74,14 +77,14 @@ class Runtime:
                 span_exporter = OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
             self.provider.add_span_processor(BatchSpanProcessor(span_exporter))
             self.tracer = self.provider.get_tracer("lab.workload")
-            otel = {"tracer_provider": self.provider}
         else:
             self.tracer = trace.NoOpTracer()
-            otel = False
-        kwargs = {"open_telemetry": otel}
-        if http_client is not None:
-            kwargs["http_client"] = http_client
-        self.client = anthropic.Anthropic(**kwargs) if spec.path != "none" else None
+        self.client = None
+        if spec.path != "none":
+            if os.environ.get("LAB_PROVIDER", "gemini") == "anthropic":
+                self.client = AnthropicProvider(self.provider, http_client=http_client)
+            else:
+                self.client = GeminiProvider(self.tracer, httpx_client=http_client)
 
     # ------------------------------------------------------------ identity / resource
 
@@ -121,12 +124,14 @@ class Runtime:
             self.log(f"START RequestId: {self.request_id} Version: $LATEST")
         handlers = []
         if self.spec.path == "direct":
-            # httpx2 logs every request at INFO - exactly what lands in CloudWatch in prod.
-            h = _Capture(self)
-            lg = logging.getLogger("httpx2")
-            lg.setLevel(logging.INFO)
-            lg.addHandler(h)
-            handlers.append((lg, h))
+            # The SDKs' HTTP libraries (httpx / httpx2) log every request at INFO - exactly
+            # what lands in CloudWatch in prod.
+            for name in ("httpx", "httpx2"):
+                h = _Capture(self)
+                lg = logging.getLogger(name)
+                lg.setLevel(logging.INFO)
+                lg.addHandler(h)
+                handlers.append((lg, h))
         try:
             with self.tracer.start_as_current_span(name, kind=SpanKind.SERVER):
                 yield
@@ -139,10 +144,10 @@ class Runtime:
 
     # ------------------------------------------------------------ helpers for workloads
 
-    def llm(self, **request) -> anthropic.types.Message:
+    def llm(self, **request):
         assert self.client is not None, f"{self.spec.name} is not an LLM workload"
         request.setdefault("max_tokens", 2048)
-        response = self.client.messages.create(model=self.model, **request)
+        response = self.client.create(**request)
         if self.spec.path == "bedrock":
             self.mirror.model_call(self.identity, self.bedrock_model_id, request, response)
         return response

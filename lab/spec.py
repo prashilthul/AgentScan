@@ -16,7 +16,7 @@ from typing import Literal
 Kind = Literal["lambda", "ecs", "sagemaker", "bedrock-agent"]
 Label = Literal["agent", "llm", "service"]
 # bedrock:  the call is mirrored into CloudTrail + Bedrock invocation logs (as AWS would)
-# direct:   the workload calls api.anthropic.com itself; AWS sees nothing but app logs
+# direct:   the workload calls the provider API (Gemini / Anthropic) itself; AWS sees nothing but app logs
 # agent:    a managed Bedrock Agent; CloudTrail records InvokeAgent calls made to it
 # none:     no LLM at all
 Path = Literal["bedrock", "direct", "agent", "none"]
@@ -73,7 +73,7 @@ WORKLOADS: list[Spec] = [
         traced=True,
         module="research_crew",
         iam_actions=["secretsmanager:GetSecretValue", "s3:GetObject"] + LOGS,
-        secret="prod/research-crew/anthropic-api-key",
+        secret="prod/research-crew/gemini-api-key",
         env={"KB_BUCKET": "acme-kb"},
         image="123456789012.dkr.ecr.us-east-1.amazonaws.com/research-crew:1.3.0",
     ),
@@ -129,13 +129,13 @@ WORKLOADS: list[Spec] = [
         name="review-sentiment",
         kind="lambda",
         label="llm",
-        why="One call per review, straight to api.anthropic.com. NOT instrumented, not via "
+        why="One call per review, straight to the provider API. NOT instrumented, not via "
         "Bedrock: only app logs and IAM secret access give it away.",
         path="direct",
         traced=False,
         module="review_sentiment",
         iam_actions=["secretsmanager:GetSecretValue"] + LOGS,
-        secret="prod/review-sentiment/anthropic-api-key",
+        secret="prod/review-sentiment/gemini-api-key",
         env={"API_KEY_SECRET_ARN": "(set at deploy)"},
     ),
     Spec(
