@@ -10,8 +10,10 @@ from botocore.exceptions import BotoCoreError, ClientError
 from httpx import HTTPError
 
 from agentscan import __version__
+from agentscan.access import OPTIONAL_SOURCES, requests
 from agentscan.aws import Aws
 from agentscan.collectors.cloudtrail import collect_cloudtrail
+from agentscan.collectors.discovery import UNCOVERED_COMPUTE, collect_discovery
 from agentscan.collectors.iam import collect_iam
 from agentscan.collectors.inventory import COLLECTORS
 from agentscan.collectors.logs import collect_app_logs, collect_invocation_logs
@@ -22,8 +24,7 @@ from agentscan.models import AccountSnapshot, Report, SourceStatus, WorkloadResu
 from agentscan.scoring import classify
 from agentscan.signals import extract
 
-# Sources that can be switched off, e.g. to measure what each one contributes.
-OPTIONAL_SOURCES = ("iam", "cloudtrail", "invocation-logs", "app-logs", "traces")
+__all__ = ["OPTIONAL_SOURCES", "analyse", "collect", "diff"]
 
 
 def _run(snap: AccountSnapshot, name: str, fn: Callable[[], str | None]) -> None:
@@ -48,6 +49,9 @@ def collect(
         lookback_hours=lookback_hours,
     )
     for region in regions:
+        _run(
+            snap, f"discovery@{region}", lambda region=region: collect_discovery(aws, region, snap)
+        )
         for name, fn in COLLECTORS.items():
             _run(snap, f"{name}@{region}", lambda fn=fn, region=region: fn(aws, region, snap))
     if "iam" not in disabled:
@@ -79,6 +83,7 @@ def analyse(snap: AccountSnapshot, judge: Judge | None = None) -> Report:
             cls = judge.review(wl, evidence, cls)
         results.append(WorkloadResult(workload=wl, classification=cls, evidence=evidence))
     summary = Counter(r.classification.category.value for r in results)
+    classified = {res.arn for r in results for res in [r.workload.primary, *r.workload.components]}
     return Report(
         version=__version__,
         generated_at=datetime.now(UTC),
@@ -89,4 +94,33 @@ def analyse(snap: AccountSnapshot, judge: Judge | None = None) -> Report:
         summary={k: summary.get(k, 0) for k in ("agent", "llm", "service")},
         results=results,
         unattributed_trace_services=unattributed,
+        inventory=dict(sorted(Counter(d.type for d in snap.discovered).items())),
+        unclassified=[
+            d for d in snap.discovered if d.type in UNCOVERED_COMPUTE and d.arn not in classified
+        ],
+        access_requests=requests(results, snap.sources),
     )
+
+
+def diff(prev: Report, cur: Report) -> list[str]:
+    """What this scan learned compared with the previous one."""
+    before = {r.workload.id: r for r in prev.results}
+    out = []
+    for r in cur.results:
+        c, old = r.classification, before.pop(r.workload.id, None)
+        if old is None:
+            out.append(f"{r.workload.name}: new, {c.category} ({c.confidence:.2f})")
+            continue
+        o = old.classification
+        if o.category != c.category:
+            out.append(
+                f"{r.workload.name}: {o.category} -> {c.category} "
+                f"({o.confidence:.2f} -> {c.confidence:.2f})"
+            )
+        elif abs(o.confidence - c.confidence) >= 0.05:
+            out.append(f"{r.workload.name}: confidence {o.confidence:.2f} -> {c.confidence:.2f}")
+    out += [f"{r.workload.name}: no longer found" for r in before.values()]
+    granted = [
+        f"access granted since last scan: {s}" for s in sorted(set(cur.grants) - set(prev.grants))
+    ]
+    return granted + out

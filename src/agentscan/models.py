@@ -110,6 +110,15 @@ class TraceStats(BaseModel):
     sample_trace_ids: list[str] = Field(default_factory=list)
 
 
+class DiscoveredResource(BaseModel):
+    """Anything the account-wide sweep found, before any per-service collector ran."""
+
+    arn: str
+    type: str  # "<service>.<resource type>" parsed from the ARN, e.g. ec2.instance
+    region: str
+    via: str  # resource-explorer | tagging-api
+
+
 class SourceStatus(BaseModel):
     name: str
     ok: bool
@@ -121,6 +130,7 @@ class AccountSnapshot(BaseModel):
     regions: list[str]
     collected_at: datetime
     lookback_hours: int
+    discovered: list[DiscoveredResource] = Field(default_factory=list)
     resources: list[Resource] = Field(default_factory=list)
     role_policies: dict[str, RolePolicy] = Field(default_factory=dict)
     trail_events: list[TrailEvent] = Field(default_factory=list)
@@ -197,6 +207,16 @@ class WorkloadResult(BaseModel):
     evidence: list[Evidence]
 
 
+class AccessRequest(BaseModel):
+    """Data the crawler wants but doesn't have, and why. A human on the client side decides."""
+
+    source: str
+    status: str  # "not approved" | "approved but failed: <error>"
+    permissions: list[str]
+    why: str
+    workloads: list[str]  # names of the workloads this would help settle
+
+
 class Report(BaseModel):
     tool: str = "agentscan"
     version: str
@@ -208,3 +228,8 @@ class Report(BaseModel):
     summary: dict[str, int]
     results: list[WorkloadResult]
     unattributed_trace_services: list[str] = Field(default_factory=list)
+    inventory: dict[str, int] = Field(default_factory=dict)  # discovered resources by type
+    unclassified: list[DiscoveredResource] = Field(default_factory=list)
+    access_requests: list[AccessRequest] = Field(default_factory=list)
+    grants: dict[str, dict[str, str]] = Field(default_factory=dict)  # source -> who/when
+    changes: list[str] = Field(default_factory=list)  # versus the previous report

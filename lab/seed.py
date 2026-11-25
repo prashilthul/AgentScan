@@ -233,6 +233,26 @@ def seed(out_dir: Path = Path("out")) -> dict:
             state["arns"][spec.name] = agent["agentArn"]
             state["agent_ids"][spec.name] = agent["agentId"]
 
+    # --- compute agentscan has no collector for: discovery must still surface it
+    ec2 = boto3.client("ec2", region_name=region)
+    ec2.run_instances(
+        ImageId=ec2.describe_images()["Images"][0]["ImageId"],
+        MinCount=1,
+        MaxCount=1,
+        TagSpecifications=[
+            {"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": "legacy-batch"}]}
+        ],
+    )
+    sfn_role = iam.create_role(
+        RoleName="claims-flow-role", AssumeRolePolicyDocument=_trust("states.amazonaws.com")
+    )["Role"]["Arn"]
+    boto3.client("stepfunctions", region_name=region).create_state_machine(
+        name="claims-flow",
+        definition=json.dumps({"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}}),
+        roleArn=sfn_role,
+        tags=[{"key": "team", "value": "claims"}],
+    )
+
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "lab_state.json").write_text(json.dumps(state, indent=2))
     truth = {

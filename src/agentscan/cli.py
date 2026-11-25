@@ -1,6 +1,7 @@
 """agentscan CLI.
 
-agentscan scan     crawl the account and write a JSON report
+agentscan scan     crawl the account with the access approved so far, write a JSON report
+agentscan approve  record that the client approved one more source
 agentscan eval     score a report against ground truth
 agentscan explain  show the evidence trail for one workload
 """
@@ -14,14 +15,18 @@ from typing import Annotated
 
 import typer
 from dotenv import load_dotenv
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
+from agentscan import access
 from agentscan.collectors.traces import JaegerSource
 from agentscan.evaluate import LABELS, evaluate
 from agentscan.judge import Judge
 from agentscan.models import Report
-from agentscan.scan import OPTIONAL_SOURCES, analyse, collect
+from agentscan.scan import OPTIONAL_SOURCES, analyse, collect, diff
+
+GRANTS = Path("out/grants.json")
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 console = Console()
@@ -65,14 +70,19 @@ def scan(
     judge_threshold: Annotated[
         float, typer.Option(help="Judge results below this confidence")
     ] = 0.7,
+    grants: Annotated[
+        Path, typer.Option(help="Approved sources (see `agentscan approve`)")
+    ] = GRANTS,
 ) -> None:
-    """Crawl the account (read-only) and classify every workload."""
+    """Crawl the account (read-only) with the approved sources and classify every workload."""
     load_dotenv()
     from agentscan.aws import Aws
 
     disabled = set(disable or [])
     if bad := disabled - set(OPTIONAL_SOURCES):
         raise typer.BadParameter(f"unknown source(s): {', '.join(sorted(bad))}")
+    approved = access.load_grants(grants)
+    disabled |= set(OPTIONAL_SOURCES) - set(approved)
     regions = region or [os.environ.get("AWS_DEFAULT_REGION", "us-east-1")]
     source = None
     if trace_backend == "jaeger":
@@ -91,6 +101,11 @@ def scan(
         snap = collect(Aws(profile), regions, lookback_hours, source, disabled)
     with console.status("classifying..."):
         report = analyse(snap, reviewer)
+    report.grants = approved
+    try:
+        report.changes = diff(Report.model_validate_json(out.read_text()), report)
+    except (OSError, ValidationError):
+        pass  # first scan, or an unreadable previous report: nothing to compare against
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report.model_dump_json(indent=2))
@@ -103,7 +118,51 @@ def scan(
             f"  traced services with no matching resource: "
             f"{', '.join(report.unattributed_trace_services)}"
         )
+    for d in report.unclassified:
+        console.print(f"  [yellow]found, not classified yet[/] {d.type} {d.arn}")
+    for change in report.changes:
+        console.print(f"  [cyan]changed[/] {change}")
+    for req in report.access_requests:
+        console.print(
+            f"\n[bold]access request: {req.source}[/] ({req.status})\n  why: {req.why}\n"
+            f"  would help: {', '.join(req.workloads)}\n"
+            f"  needs: {', '.join(req.permissions)}\n"
+            f"  approve with: agentscan approve {req.source} --by <name>"
+        )
     console.print(f"report written to {out}")
+
+
+@app.command()
+def approve(
+    source: str,
+    by: Annotated[str, typer.Option(help="Who on the client side approved this")],
+    note: Annotated[str, typer.Option(help="Ticket, scope or conditions")] = "",
+    grants: Annotated[Path, typer.Option(help="Grants file the scan reads")] = GRANTS,
+    report_path: Annotated[
+        Path, typer.Option("--report", help="Report holding the request")
+    ] = Path("out/report.json"),
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt")] = False,
+) -> None:
+    """Record the client's approval for one more data source."""
+    if source not in access.CATALOG:
+        raise typer.BadParameter(f"unknown source {source!r}; one of {', '.join(OPTIONAL_SOURCES)}")
+    acc = access.CATALOG[source]
+    console.print(f"[bold]{source}[/]\n  reads: {acc.reads}\n  never reads: {acc.never_reads}")
+    console.print(f"  permissions: {', '.join(acc.permissions)}")
+    try:
+        pending = Report.model_validate_json(report_path.read_text()).access_requests
+    except (OSError, ValidationError):
+        pending = []
+    for req in pending:
+        if req.source == source:
+            console.print(f"  requested because: {req.why}\n  for: {', '.join(req.workloads)}")
+    if not yes:
+        typer.confirm(f"Record that {by} approved {source}?", abort=True)
+    try:
+        g = access.approve(grants, source, by, note)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    console.print(f"approved by {g['approved_by']} at {g['approved_at']} -> {grants}")
 
 
 @app.command("eval")
