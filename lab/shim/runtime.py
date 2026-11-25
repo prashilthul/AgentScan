@@ -147,9 +147,16 @@ class Runtime:
     def llm(self, **request):
         assert self.client is not None, f"{self.spec.name} is not an LLM workload"
         request.setdefault("max_tokens", 2048)
-        response = self.client.create(**request)
-        if self.spec.path == "bedrock":
-            self.mirror.model_call(self.identity, self.bedrock_model_id, request, response)
+        via_bedrock = self.spec.path in ("bedrock", "agent")
+        # One id per Bedrock call, shared by the span, CloudTrail and the invocation log.
+        aws_request_id = str(uuid.uuid4()) if via_bedrock else None
+        response = self.client.create(
+            **request, span_attrs={"aws.request_id": aws_request_id} if via_bedrock else None
+        )
+        if via_bedrock:
+            self.mirror.model_call(
+                self.identity, self.bedrock_model_id, request, response, aws_request_id
+            )
         return response
 
     def agent_span(self, agent_name: str):

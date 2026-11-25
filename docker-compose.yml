@@ -1,13 +1,12 @@
-# Local stand-in for the client's AWS account + its observability stack.
-#   moto            -> fake AWS control plane (metadata, CloudTrail S3, CloudWatch Logs)
-#   otel-collector  -> receives OTLP from the lab workloads (like ADOT on AWS)
+# Local stand-in for the client's AWS account, its observability stack, and our store.
+#   floci           -> AWS emulator (https://floci.io): resources, IAM, CloudTrail S3, CloudWatch
+#   otel-collector  -> receives OTLP from the instrumented agents (like ADOT on AWS)
 #   jaeger          -> trace store the crawler queries (stands in for X-Ray)
+#   postgres        -> where agentscan keeps scans and the merged audit trail
 services:
-  moto:
-    image: motoserver/moto:5.2.6
-    ports: ["5000:5000"]
-    environment:
-      MOTO_PORT: "5000"
+  floci:
+    image: floci/floci:latest
+    ports: ["4566:4566"]
 
   jaeger:
     image: jaegertracing/all-in-one:1.62.0
@@ -21,3 +20,15 @@ services:
     volumes: ["./infra/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
     ports: ["4318:4318"]            # OTLP/HTTP in
     depends_on: [jaeger]
+
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5433:5432"]            # 5433 on the host, to stay clear of a local Postgres
+    environment:
+      POSTGRES_USER: agentscan
+      POSTGRES_PASSWORD: agentscan
+      POSTGRES_DB: agentscan
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "agentscan"]
+      interval: 2s
+      retries: 15

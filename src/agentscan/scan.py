@@ -11,6 +11,7 @@ from httpx import HTTPError
 
 from agentscan import __version__
 from agentscan.access import OPTIONAL_SOURCES, requests
+from agentscan.audit import normalise
 from agentscan.aws import Aws
 from agentscan.collectors.cloudtrail import collect_cloudtrail
 from agentscan.collectors.discovery import UNCOVERED_COMPUTE, collect_discovery
@@ -21,6 +22,7 @@ from agentscan.collectors.traces import TraceSource, collect_traces
 from agentscan.correlate import correlate
 from agentscan.judge import Judge
 from agentscan.models import AccountSnapshot, Report, SourceStatus, WorkloadResult
+from agentscan.risk import assess
 from agentscan.scoring import classify
 from agentscan.signals import extract
 
@@ -75,13 +77,26 @@ def collect(
 def analyse(snap: AccountSnapshot, judge: Judge | None = None) -> Report:
     workloads, unattributed = correlate(snap)
     role_count = Counter(w.primary.role_arn for w in workloads if w.primary.role_arn)
+    events = normalise(snap, workloads)
+    by_wl: dict[str, list] = {}
+    for e in events:
+        by_wl.setdefault(e.workload_id or "", []).append(e)
     results = []
     for wl in sorted(workloads, key=lambda w: w.name):
         evidence = extract(wl, snap, role_shared=role_count[wl.primary.role_arn] > 1)
         cls = classify(evidence)
         if judge is not None:
             cls = judge.review(wl, evidence, cls)
-        results.append(WorkloadResult(workload=wl, classification=cls, evidence=evidence))
+        mine = by_wl.get(wl.id, [])
+        results.append(
+            WorkloadResult(
+                workload=wl,
+                classification=cls,
+                evidence=evidence,
+                risk=assess(wl, cls, evidence, mine, snap),
+                activity=activity(mine),
+            )
+        )
     summary = Counter(r.classification.category.value for r in results)
     classified = {res.arn for r in results for res in [r.workload.primary, *r.workload.components]}
     return Report(
@@ -99,7 +114,21 @@ def analyse(snap: AccountSnapshot, judge: Judge | None = None) -> Report:
             d for d in snap.discovered if d.type in UNCOVERED_COMPUTE and d.arn not in classified
         ],
         access_requests=requests(results, snap.sources),
+        audit_events=events,
     )
+
+
+def activity(events: list) -> dict[str, int]:
+    """Distinct actions by type. Spans are the fullest record, so when a workload has them
+    they're what's counted; otherwise the AWS records for one call are merged by request id."""
+    out = {}
+    for action in sorted({e.action for e in events}):
+        same = [e for e in events if e.action == action]
+        same = [e for e in same if e.source == "otel"] or same
+        out[action] = len({e.call_id or e.id for e in same})
+    if "tool_call" in out:  # spans show the tools running; "requested" would count them twice
+        out.pop("tool_requested", None)
+    return out
 
 
 def diff(prev: Report, cur: Report) -> list[str]:

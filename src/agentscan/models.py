@@ -34,13 +34,16 @@ class Tier(StrEnum):
 
 TIER_RANK = {Tier.DECLARED: 1, Tier.OBSERVED: 2, Tier.BEHAVIORAL: 3}
 
+# Resource types that are managed agents by construction.
+AGENT_TYPES = {"bedrock.agent", "bedrock-agentcore.runtime"}
+
 
 # --------------------------------------------------------------------------- inventory
 
 
 class Resource(BaseModel):
     arn: str
-    type: str  # lambda.function | ecs.service | sagemaker.endpoint | bedrock.agent
+    type: str  # lambda.function | ecs.service | sagemaker.endpoint | bedrock.agent | bedrock-agentcore.runtime
     name: str
     region: str
     role_arn: str | None = None
@@ -69,6 +72,7 @@ class TrailEvent(BaseModel):
     role_arn: str | None  # issuing role, when the principal is an assumed role
     session_name: str | None
     request_parameters: dict[str, Any] = Field(default_factory=dict)
+    request_id: str | None = None
 
 
 class InvocationRecord(BaseModel):
@@ -82,6 +86,9 @@ class InvocationRecord(BaseModel):
     tools_offered: int  # number of tools in toolConfig
     tool_results_in_input: int  # toolResult blocks fed back = continuation of a tool loop
     stop_reason: str | None
+    tools_requested: list[str] = Field(default_factory=list)  # tool names the model asked for
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class LogHit(BaseModel):
@@ -90,6 +97,16 @@ class LogHit(BaseModel):
     count: int
     invocations_seen: int  # Lambda START lines seen in the window
     max_calls_per_invocation: int
+
+
+class LogCall(BaseModel):
+    """One app-log line showing an HTTP call to an LLM provider (the line itself isn't kept)."""
+
+    log_group: str
+    stream: str
+    timestamp: datetime
+    endpoint: str
+    invocation_id: str | None  # Lambda request id when the line sits between START and END
 
 
 class TraceStats(BaseModel):
@@ -136,6 +153,8 @@ class AccountSnapshot(BaseModel):
     trail_events: list[TrailEvent] = Field(default_factory=list)
     invocations: list[InvocationRecord] = Field(default_factory=list)
     log_hits: list[LogHit] = Field(default_factory=list)
+    log_calls: list[LogCall] = Field(default_factory=list)
+    spans: list[dict[str, Any]] = Field(default_factory=list)  # raw spans, for the audit trail
     trace_stats: dict[str, TraceStats] = Field(default_factory=dict)  # keyed by service.name
     secret_names: list[str] = Field(default_factory=list)
     # Bedrock agent id -> Lambda ARNs that execute its action groups
@@ -201,10 +220,48 @@ class Classification(BaseModel):
     judge: JudgeVerdict | None = None
 
 
+class AuditEvent(BaseModel):
+    """One thing an AI workload did, in one format whatever source recorded it.
+
+    The same Bedrock call is seen by up to three sources (span, CloudTrail, invocation log);
+    each gives its own row, and `call_id` (the AWS request id) ties them together.
+    Structure only: no prompt, completion or tool argument text is ever kept.
+    """
+
+    id: str  # stable hash of source + the source's own id: re-ingesting is a no-op
+    account_id: str
+    workload_id: str | None  # ARN of the workload it belongs to; None if it can't be attributed
+    workload: str | None
+    occurred_at: datetime
+    source: str  # otel | cloudtrail | bedrock-invocation-log | app-log
+    action: str  # model_call | tool_call | tool_requested | agent_invoked | agent_step
+    target: str  # model id, tool name, agent name or provider host
+    actor: str  # principal ARN or service.name that did it
+    correlation_id: str | None = None  # trace id, Lambda request id or agent session
+    call_id: str | None = None  # AWS request id, shared by every record of one Bedrock call
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class RiskFactor(BaseModel):
+    key: str
+    points: int
+    why: str
+    owasp: list[str]  # OWASP Top 10 for LLM Applications 2025 ids
+    atlas: list[str]  # MITRE ATLAS technique ids
+
+
+class Risk(BaseModel):
+    tier: str  # high | medium | low
+    score: int
+    factors: list[RiskFactor]
+
+
 class WorkloadResult(BaseModel):
     workload: Workload
     classification: Classification
     evidence: list[Evidence]
+    risk: Risk | None = None
+    activity: dict[str, int] = Field(default_factory=dict)  # distinct actions by type
 
 
 class AccessRequest(BaseModel):
@@ -233,3 +290,5 @@ class Report(BaseModel):
     access_requests: list[AccessRequest] = Field(default_factory=list)
     grants: dict[str, dict[str, str]] = Field(default_factory=dict)  # source -> who/when
     changes: list[str] = Field(default_factory=list)  # versus the previous report
+    # Kept in memory for the store; the JSON report stays small.
+    audit_events: list[AuditEvent] = Field(default_factory=list, exclude=True)

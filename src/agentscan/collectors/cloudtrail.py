@@ -36,6 +36,7 @@ def _to_event(rec: dict) -> TrailEvent | None:
         role_arn=issuer,
         session_name=session,
         request_parameters=rec.get("requestParameters") or {},
+        request_id=rec.get("requestID"),
     )
 
 

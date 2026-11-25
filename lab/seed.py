@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 from lab.shim.mirror import INVOCATION_LOG_GROUP, TRAIL_BUCKET
@@ -24,7 +25,7 @@ TRUST = {
     "lambda": "lambda.amazonaws.com",
     "ecs": "ecs-tasks.amazonaws.com",
     "sagemaker": "sagemaker.amazonaws.com",
-    "bedrock-agent": "bedrock.amazonaws.com",
+    "agentcore": "bedrock-agentcore.amazonaws.com",
 }
 CLUSTER = "prod"
 
@@ -62,15 +63,19 @@ def seed(out_dir: Path = Path("out")) -> dict:
     ct.create_trail(Name="org-trail", S3BucketName=TRAIL_BUCKET, IsMultiRegionTrail=True)
     ct.start_logging(Name="org-trail")
     logs.create_log_group(logGroupName=INVOCATION_LOG_GROUP)
-    boto3.client("bedrock", region_name=region).put_model_invocation_logging_configuration(
-        loggingConfig={
-            "cloudWatchConfig": {
-                "logGroupName": INVOCATION_LOG_GROUP,
-                "roleArn": f"arn:aws:iam::{account}:role/bedrock-logging",
-            },
-            "textDataDeliveryEnabled": True,
-        }
-    )
+    try:
+        boto3.client("bedrock", region_name=region).put_model_invocation_logging_configuration(
+            loggingConfig={
+                "cloudWatchConfig": {
+                    "logGroupName": INVOCATION_LOG_GROUP,
+                    "roleArn": f"arn:aws:iam::{account}:role/bedrock-logging",
+                },
+                "textDataDeliveryEnabled": True,
+            }
+        )
+    except ClientError as e:  # Floci has no logging-config API; the log group itself is enough
+        if e.response["Error"]["Code"] != "UnknownOperationException":
+            raise
 
     # --- secrets (names only matter to the crawler)
     secret_arns: dict[str, str] = {}
@@ -109,7 +114,7 @@ def seed(out_dir: Path = Path("out")) -> dict:
                 PolicyName="app",
                 PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": statements}),
             )
-    # Humans reach the Bedrock agent through the console with this role.
+    # Humans reach the AgentCore agent through the console with this role.
     iam.create_role(RoleName="ops-console", AssumeRolePolicyDocument=_trust("ec2.amazonaws.com"))
     iam.put_role_policy(
         RoleName="ops-console",
@@ -118,7 +123,11 @@ def seed(out_dir: Path = Path("out")) -> dict:
             {
                 "Version": "2012-10-17",
                 "Statement": [
-                    {"Effect": "Allow", "Action": ["bedrock:InvokeAgent"], "Resource": "*"}
+                    {
+                        "Effect": "Allow",
+                        "Action": ["bedrock-agentcore:InvokeAgentRuntime"],
+                        "Resource": "*",
+                    }
                 ],
             }
         ),
@@ -129,13 +138,12 @@ def seed(out_dir: Path = Path("out")) -> dict:
         "region": region,
         "arns": {},
         "log_groups": {},
-        "agent_ids": {},
         "ecs_cluster_arn": None,
     }
     lam = boto3.client("lambda", region_name=region)
     ecs = boto3.client("ecs", region_name=region)
     sage = boto3.client("sagemaker", region_name=region)
-    agents = boto3.client("bedrock-agent", region_name=region)
+    agentcore = boto3.client("bedrock-agentcore-control", region_name=region)
     state["ecs_cluster_arn"] = ecs.create_cluster(clusterName=CLUSTER)["cluster"]["clusterArn"]
     layer_arns: dict[str, str] = {}
 
@@ -196,8 +204,10 @@ def seed(out_dir: Path = Path("out")) -> dict:
                 executionRoleArn=role_arn,
                 containerDefinitions=[container],
             )
+            # desiredCount 0: emulators that run real containers would try to pull the
+            # (made-up) image. The crawler reads the service and task definition only.
             svc = ecs.create_service(
-                cluster=CLUSTER, serviceName=spec.name, taskDefinition=spec.name, desiredCount=2
+                cluster=CLUSTER, serviceName=spec.name, taskDefinition=spec.name, desiredCount=0
             )["service"]
             state["arns"][spec.name] = svc["serviceArn"]
             state["log_groups"][spec.name] = group
@@ -223,15 +233,18 @@ def seed(out_dir: Path = Path("out")) -> dict:
                 EndpointName=spec.name, EndpointConfigName=f"{spec.name}-config"
             )["EndpointArn"]
 
-        elif spec.kind == "bedrock-agent":
-            agent = agents.create_agent(
-                agentName=spec.name,
-                foundationModel="anthropic.claude-haiku-5-5",
-                agentResourceRoleArn=role_arn,
-                instruction="You are an SRE assistant. Investigate alarms and follow runbooks.",
-            )["agent"]
-            state["arns"][spec.name] = agent["agentArn"]
-            state["agent_ids"][spec.name] = agent["agentId"]
+        elif spec.kind == "agentcore":
+            rt = agentcore.create_agent_runtime(
+                agentRuntimeName=spec.name.replace("-", "_"),
+                agentRuntimeArtifact={"containerConfiguration": {"containerUri": spec.image}},
+                roleArn=role_arn,
+                networkConfiguration={"networkMode": "PUBLIC"},
+                environmentVariables=env,
+            )
+            state["arns"][spec.name] = rt["agentRuntimeArn"]
+            group = f"/aws/bedrock-agentcore/runtimes/{rt['agentRuntimeId']}-DEFAULT"
+            logs.create_log_group(logGroupName=group)
+            state["log_groups"][spec.name] = group
 
     # --- compute agentscan has no collector for: discovery must still surface it
     ec2 = boto3.client("ec2", region_name=region)

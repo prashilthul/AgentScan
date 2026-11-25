@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from agentscan.models import AccountSnapshot, Evidence, Tier, Workload
+from agentscan.models import AGENT_TYPES, AccountSnapshot, Evidence, Tier, Workload
 
 # (tier, ai_weight, agentic_weight)
 WEIGHTS: dict[str, tuple[Tier, float, float]] = {
@@ -80,6 +80,14 @@ MODEL_CALL_EVENTS = {
 AGENT_CALL_EVENTS = {"InvokeAgent", "InvokeInlineAgent", "InvokeAgentRuntime"}
 
 
+def invoked_agent(ev) -> str | None:
+    """Which agent a CloudTrail event invoked: an agent id or an AgentCore runtime ARN."""
+    if ev.event_name not in AGENT_CALL_EVENTS:
+        return None
+    p = ev.request_parameters
+    return p.get("agentRuntimeArn") or p.get("agentId")
+
+
 def _role_name(arn: str | None) -> str | None:
     """Role name from a role ARN or an assumed-role principal ARN."""
     if not arn:
@@ -139,11 +147,13 @@ def _ai_actions(snap: AccountSnapshot, role_arn: str | None) -> dict[str, list[s
 def _declared(b: _Builder, snap: AccountSnapshot) -> None:
     wl = b.wl
     res = wl.primary
-    if res.type == "bedrock.agent":
+    if res.type in AGENT_TYPES:
+        kind = "an AgentCore runtime" if "agentcore" in res.type else "a Bedrock Agent"
+        model = res.attributes.get("foundation_model")
         b.add(
             "resource.bedrock_agent",
-            "bedrock-agent",
-            f"Resource is a Bedrock Agent (model {res.attributes.get('foundation_model')}).",
+            res.type.split(".")[0],
+            f"Resource is {kind}" + (f" (model {model})." if model else "."),
             arn=res.arn,
         )
 
@@ -255,12 +265,11 @@ def _observed(b: _Builder, snap: AccountSnapshot, role_shared: bool) -> None:
         )
 
     # CloudTrail: calls made TO this workload (Bedrock agents).
-    if res.type == "bedrock.agent":
-        agent_id = res.attributes.get("agent_id")
+    if res.type in AGENT_TYPES:
         to_me = [
             e
             for e in snap.trail_events
-            if e.event_name in AGENT_CALL_EVENTS and e.request_parameters.get("agentId") == agent_id
+            if invoked_agent(e) in (res.arn, res.attributes.get("agent_id"))
         ]
         if to_me:
             b.add(
@@ -280,7 +289,7 @@ def _observed(b: _Builder, snap: AccountSnapshot, role_shared: bool) -> None:
         and bedrock_perm
         and not model_calls
         and not agent_calls
-        and res.type != "bedrock.agent"
+        and res.type not in AGENT_TYPES
     ):
         b.add(
             "cloudtrail.permission_unused",

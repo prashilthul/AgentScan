@@ -13,11 +13,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Kind = Literal["lambda", "ecs", "sagemaker", "bedrock-agent"]
+Kind = Literal["lambda", "ecs", "sagemaker", "agentcore"]
 Label = Literal["agent", "llm", "service"]
 # bedrock:  the call is mirrored into CloudTrail + Bedrock invocation logs (as AWS would)
 # direct:   the workload calls the provider API (Gemini / Anthropic) itself; AWS sees nothing but app logs
-# agent:    a managed Bedrock Agent; CloudTrail records InvokeAgent calls made to it
+# agent:    a Bedrock AgentCore runtime: CloudTrail records InvokeAgentRuntime calls made to it,
+#           and its own model calls go through Bedrock like the bedrock path
 # none:     no LLM at all
 Path = Literal["bedrock", "direct", "agent", "none"]
 
@@ -79,13 +80,16 @@ WORKLOADS: list[Spec] = [
     ),
     Spec(
         name="ops-copilot",
-        kind="bedrock-agent",
+        kind="agentcore",
         label="agent",
-        why="Managed Bedrock Agent; checks alarms, reads runbooks, restarts services.",
+        why="Bedrock AgentCore runtime; checks alarms, reads runbooks, restarts services. "
+        "Invoked by on-call engineers. NOT instrumented: CloudTrail and invocation logs only.",
         path="agent",
         traced=False,
         module="ops_copilot",
-        iam_actions=BEDROCK_INVOKE,
+        iam_actions=BEDROCK_INVOKE + ["ecs:UpdateService", "cloudwatch:DescribeAlarms"],
+        env={"MODEL_ID": "anthropic.claude-haiku-5-5", "AGENT_MAX_STEPS": "8"},
+        image="123456789012.dkr.ecr.us-east-1.amazonaws.com/ops-copilot:2.0.0",
     ),
     Spec(
         name="invoice-agent",

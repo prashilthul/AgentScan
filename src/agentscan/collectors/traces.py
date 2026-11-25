@@ -12,7 +12,7 @@ Backends:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
 import httpx
@@ -143,8 +143,13 @@ def summarise(service: str, traces: list[list[Span]]) -> TraceStats:
 
 def collect_traces(source: TraceSource, snap: AccountSnapshot, limit_per_service: int = 50) -> str:
     services = source.services()
+    seen: set[str] = set()
     for svc in services:
-        snap.trace_stats[svc] = summarise(
-            svc, source.traces(svc, snap.lookback_hours, limit_per_service)
-        )
+        traces = source.traces(svc, snap.lookback_hours, limit_per_service)
+        snap.trace_stats[svc] = summarise(svc, traces)
+        for spans in traces:
+            for s in spans:
+                if s.service == svc and s.span_id not in seen:
+                    seen.add(s.span_id)
+                    snap.spans.append(asdict(s))
     return f"{len(services)} traced service(s)"

@@ -4,6 +4,7 @@ agentscan scan     crawl the account with the access approved so far, write a JS
 agentscan approve  record that the client approved one more source
 agentscan eval     score a report against ground truth
 agentscan explain  show the evidence trail for one workload
+agentscan serve    governance dashboard + API over the stored scans and audit trail
 """
 
 from __future__ import annotations
@@ -73,6 +74,10 @@ def scan(
     grants: Annotated[
         Path, typer.Option(help="Approved sources (see `agentscan approve`)")
     ] = GRANTS,
+    db: Annotated[
+        str | None, typer.Option(help="postgresql:// URL or SQLite path (default $AGENTSCAN_DB)")
+    ] = None,
+    store: Annotated[bool, typer.Option(help="Save the scan and audit trail to the store")] = True,
 ) -> None:
     """Crawl the account (read-only) with the approved sources and classify every workload."""
     load_dotenv()
@@ -91,7 +96,7 @@ def scan(
     reviewer = None
     if judge:
         provider = judge_provider or os.environ.get("JUDGE_PROVIDER", "gemini")
-        default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-sonnet-5-5"
+        default_model = "gemini-3.5-flash" if provider == "gemini" else "claude-sonnet-5-5"
         reviewer = Judge(
             judge_model or os.environ.get("JUDGE_MODEL", default_model),
             provider=provider,
@@ -109,6 +114,11 @@ def scan(
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report.model_dump_json(indent=2))
+    saved = None
+    if store:
+        from agentscan.store import Store
+
+        saved = Store(db).save(report)
     console.print(_summary_table(report))
     for s in report.sources:
         mark = "[green]ok[/]" if s.ok else "[red]FAILED[/]"
@@ -130,6 +140,29 @@ def scan(
             f"  approve with: agentscan approve {req.source} --by <name>"
         )
     console.print(f"report written to {out}")
+    if saved:
+        console.print(
+            f"stored scan {saved[0]}: {len(report.audit_events)} audit event(s), {saved[1]} new"
+        )
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option()] = "127.0.0.1",
+    port: Annotated[int, typer.Option()] = 8000,
+    db: Annotated[str | None, typer.Option(help="postgresql:// URL or SQLite path")] = None,
+) -> None:
+    """Serve the governance dashboard and its API."""
+    load_dotenv()
+    import uvicorn
+
+    from agentscan.api import WEB, create_app
+    from agentscan.store import Store
+
+    if not WEB.is_dir():
+        console.print("[yellow]web/out not built: API only (run `make web` for the dashboard)[/]")
+    console.print(f"dashboard on http://{host}:{port}")
+    uvicorn.run(create_app(Store(db)), host=host, port=port, log_level="warning")
 
 
 @app.command()

@@ -98,20 +98,22 @@ class AwsMirror:
         params: dict,
         data_event: bool,
         resources: list[dict] | None = None,
+        event_source: str = "bedrock.amazonaws.com",
+        request_id: str | None = None,
     ) -> None:
         now = datetime.now(UTC)
         rec = {
             "eventVersion": "1.09",
             "userIdentity": identity,
             "eventTime": _iso(now),
-            "eventSource": "bedrock.amazonaws.com",
+            "eventSource": event_source,
             "eventName": event_name,
             "awsRegion": self.region,
             "sourceIPAddress": "10.0.12.34",
             "userAgent": "Boto3/1.44.11 md/Botocore#1.44.11 ua/2.1 os/linux lang/python#3.13",
             "requestParameters": params,
             "responseElements": None,
-            "requestID": str(uuid.uuid4()),
+            "requestID": request_id or str(uuid.uuid4()),
             "eventID": str(uuid.uuid4()),
             "readOnly": True,
             "eventType": "AwsApiCall",
@@ -123,9 +125,15 @@ class AwsMirror:
             rec["resources"] = resources
         self.trail_records.append(rec)
 
-    def model_call(self, identity: dict, model_id: str, request: dict, response) -> None:
-        """One Bedrock Converse call: a CloudTrail event plus an invocation-log entry."""
-        self._trail(identity, "Converse", {"modelId": model_id}, data_event=False)
+    def model_call(
+        self, identity: dict, model_id: str, request: dict, response, request_id: str
+    ) -> None:
+        """One Bedrock Converse call: a CloudTrail event plus an invocation-log entry.
+
+        Both carry the same request id, as in AWS, so the audit trail can merge them."""
+        self._trail(
+            identity, "Converse", {"modelId": model_id}, data_event=False, request_id=request_id
+        )
         now = datetime.now(UTC)
         body = {"messages": to_converse_messages(request["messages"])}
         if request.get("system"):
@@ -150,7 +158,7 @@ class AwsMirror:
             "accountId": self.account_id,
             "identity": {"arn": identity["arn"]},
             "region": self.region,
-            "requestId": str(uuid.uuid4()),
+            "requestId": request_id,
             "operation": "Converse",
             "modelId": model_id,
             "input": {
@@ -182,18 +190,14 @@ class AwsMirror:
         }
         self.invocations.append((_ms(now), json.dumps(entry)))
 
-    def agent_invoked(self, identity: dict, agent_id: str, agent_arn: str, session_id: str) -> None:
+    def agent_invoked(self, identity: dict, runtime_arn: str, session_id: str) -> None:
         self._trail(
             identity,
-            "InvokeAgent",
-            {"agentId": agent_id, "agentAliasId": "TSTALIASID", "sessionId": session_id},
+            "InvokeAgentRuntime",
+            {"agentRuntimeArn": runtime_arn, "runtimeSessionId": session_id},
             data_event=True,
-            resources=[
-                {
-                    "type": "AWS::Bedrock::AgentAlias",
-                    "ARN": f"{agent_arn.replace(':agent/', ':agent-alias/')}/TSTALIASID",
-                }
-            ],
+            event_source="bedrock-agentcore.amazonaws.com",
+            resources=[{"type": "AWS::BedrockAgentCore::Runtime", "ARN": runtime_arn}],
         )
 
     def app_log(self, group: str, stream: str, message: str) -> None:

@@ -1,4 +1,4 @@
-"""Discover compute workloads: Lambda, ECS services, SageMaker endpoints, Bedrock agents.
+"""Read compute workloads: Lambda, ECS, SageMaker endpoints, Bedrock agents, AgentCore runtimes.
 
 Only names are kept for environment variables. Values can hold secrets; they are read by
 the API call (unavoidable) but dropped immediately and never stored or logged.
@@ -117,9 +117,20 @@ def collect_sagemaker(aws: Aws, region: str, snap: AccountSnapshot) -> None:
         )
 
 
-def collect_bedrock_agents(aws: Aws, region: str, snap: AccountSnapshot) -> None:
+def _unsupported(e: ClientError) -> bool:
+    """The API doesn't exist here (some emulators lack it); not the same as access denied."""
+    return e.response["Error"]["Code"] in ("UnknownOperationException", "404")
+
+
+def collect_bedrock_agents(aws: Aws, region: str, snap: AccountSnapshot) -> str | None:
     ba = aws.client("bedrock-agent", region)
-    for summary in _paginate(ba, "list_agents", "agentSummaries"):
+    try:
+        summaries = list(_paginate(ba, "list_agents", "agentSummaries"))
+    except ClientError as e:
+        if _unsupported(e):
+            return "Bedrock Agents API not available in this endpoint"
+        raise
+    for summary in summaries:
         agent = ba.get_agent(agentId=summary["agentId"])["agent"]
         snap.resources.append(
             Resource(
@@ -152,6 +163,28 @@ def collect_bedrock_agents(aws: Aws, region: str, snap: AccountSnapshot) -> None
             snap.agent_action_lambdas.setdefault(agent["agentId"], [])
 
 
+def collect_agentcore_runtimes(aws: Aws, region: str, snap: AccountSnapshot) -> None:
+    ac = aws.client("bedrock-agentcore-control", region)
+    for summary in _paginate(ac, "list_agent_runtimes", "agentRuntimes"):
+        rt = ac.get_agent_runtime(agentRuntimeId=summary["agentRuntimeId"])
+        image = ((rt.get("agentRuntimeArtifact") or {}).get("containerConfiguration") or {}).get(
+            "containerUri"
+        )
+        snap.resources.append(
+            Resource(
+                arn=rt["agentRuntimeArn"],
+                type="bedrock-agentcore.runtime",
+                name=rt["agentRuntimeName"].replace("_", "-"),
+                region=region,
+                role_arn=rt.get("roleArn"),
+                env_var_names=sorted((rt.get("environmentVariables") or {}).keys()),
+                images=[image] if image else [],
+                log_groups=[f"/aws/bedrock-agentcore/runtimes/{rt['agentRuntimeId']}-DEFAULT"],
+                attributes={"agent_id": rt["agentRuntimeId"]},
+            )
+        )
+
+
 def collect_secret_names(aws: Aws, region: str, snap: AccountSnapshot) -> None:
     sec = aws.client("secretsmanager", region)
     for s in _paginate(sec, "list_secrets", "SecretList"):  # names only, never values
@@ -163,5 +196,6 @@ COLLECTORS = {
     "ecs": collect_ecs,
     "sagemaker": collect_sagemaker,
     "bedrock-agent": collect_bedrock_agents,
+    "agentcore": collect_agentcore_runtimes,
     "secretsmanager": collect_secret_names,
 }

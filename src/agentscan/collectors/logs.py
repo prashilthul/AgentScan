@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from botocore.exceptions import ClientError
 
 from agentscan.aws import Aws
-from agentscan.models import AccountSnapshot, InvocationRecord, LogHit
+from agentscan.models import AccountSnapshot, InvocationRecord, LogCall, LogHit
 
 LLM_ENDPOINTS = {
     "api.anthropic.com": "anthropic",
@@ -31,6 +31,7 @@ LLM_ENDPOINTS = {
     "openai.azure.com": "azure-openai",
     "bedrock-runtime": "bedrock",
 }
+DEFAULT_INVOCATION_GROUP = "/aws/bedrock/modelinvocations"
 _ENDPOINT_RE = re.compile("|".join(re.escape(h) for h in LLM_ENDPOINTS))
 _START_RE = re.compile(r"^START RequestId: (\S+)")
 _END_RE = re.compile(r"^END RequestId: (\S+)")
@@ -67,6 +68,8 @@ def _parse_invocation(entry: dict) -> InvocationRecord:
     inp = (entry.get("input") or {}).get("inputBodyJson") or {}
     out = (entry.get("output") or {}).get("outputBodyJson") or {}
     tools = (inp.get("toolConfig") or {}).get("tools") or inp.get("tools") or []
+    reply = ((out.get("output") or {}).get("message") or {}).get("content") or []
+    usage = out.get("usage") or {}
     return InvocationRecord(
         request_id=entry.get("requestId", ""),
         timestamp=datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")),
@@ -76,18 +79,30 @@ def _parse_invocation(entry: dict) -> InvocationRecord:
         tools_offered=len(tools),
         tool_results_in_input=_count_tool_results(inp.get("messages")),
         stop_reason=out.get("stopReason") or out.get("stop_reason"),
+        tools_requested=[
+            b["toolUse"]["name"] for b in reply if isinstance(b, dict) and "toolUse" in b
+        ],
+        input_tokens=usage.get("inputTokens") or 0,
+        output_tokens=usage.get("outputTokens") or 0,
     )
 
 
 def collect_invocation_logs(aws: Aws, region: str, snap: AccountSnapshot) -> str:
+    logs = aws.client("logs", region)
+    note = ""
     try:
         cfg = aws.client("bedrock", region).get_model_invocation_logging_configuration()
+        group = ((cfg.get("loggingConfig") or {}).get("cloudWatchConfig") or {}).get("logGroupName")
     except ClientError as e:
-        return f"invocation logging config unreadable: {e.response['Error']['Code']}"
-    group = ((cfg.get("loggingConfig") or {}).get("cloudWatchConfig") or {}).get("logGroupName")
+        if e.response["Error"]["Code"] != "UnknownOperationException":
+            return f"invocation logging config unreadable: {e.response['Error']['Code']}"
+        # Some emulators (Floci) lack this API: try the group name AWS's console suggests.
+        group, note = DEFAULT_INVOCATION_GROUP, " (logging config API unavailable; default group)"
+        found = logs.describe_log_groups(logGroupNamePrefix=group).get("logGroups", [])
+        if not any(g["logGroupName"] == group for g in found):
+            return "logging config API unavailable and no default invocation log group"
     if not group:
         return "model invocation logging not enabled"
-    logs = aws.client("logs", region)
     n = 0
     for ev in _filter_events(logs, group, _start_ms(snap)):
         try:
@@ -95,7 +110,7 @@ def collect_invocation_logs(aws: Aws, region: str, snap: AccountSnapshot) -> str
             n += 1
         except (ValueError, KeyError):
             continue
-    return f"{n} invocation record(s) from {group}"
+    return f"{n} invocation record(s) from {group}{note}"
 
 
 # --------------------------------------------------------------------- app logs
@@ -130,6 +145,15 @@ def collect_app_logs(aws: Aws, region: str, snap: AccountSnapshot) -> str:
                 per_endpoint[m.group(0)] += 1
                 if req := current.get(stream):
                     per_invocation[req] += 1
+                snap.log_calls.append(
+                    LogCall(
+                        log_group=group,
+                        stream=stream,
+                        timestamp=datetime.fromtimestamp(ev["timestamp"] / 1000, UTC),
+                        endpoint=m.group(0),
+                        invocation_id=current.get(stream),
+                    )
+                )
         for host, count in per_endpoint.items():
             snap.log_hits.append(
                 LogHit(

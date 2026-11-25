@@ -6,7 +6,7 @@ answers: a Bedrock agent's action-group Lambda is part of the agent, not a separ
 
 from __future__ import annotations
 
-from agentscan.models import AccountSnapshot, Resource, TraceStats, Workload
+from agentscan.models import AGENT_TYPES, AccountSnapshot, Resource, TraceStats, Workload
 
 
 def _matches_trace(res: Resource, stats: TraceStats) -> bool:
@@ -28,7 +28,7 @@ def correlate(snap: AccountSnapshot) -> tuple[list[Workload], list[str]]:
     absorbed: dict[str, str] = {}  # component ARN -> owning workload ARN
 
     for res in snap.resources:
-        if res.type != "bedrock.agent":
+        if res.type not in AGENT_TYPES:
             continue
         for fn_arn in snap.agent_action_lambdas.get(res.attributes.get("agent_id", ""), []):
             if fn_arn in by_arn:

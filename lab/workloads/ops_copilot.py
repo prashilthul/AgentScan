@@ -1,7 +1,7 @@
-"""Ops copilot, deployed as a managed Bedrock Agent.
+"""Ops copilot, deployed as a Bedrock AgentCore runtime.
 
-Locally the orchestration loop runs here; the AWS-visible footprint is the agent resource
-plus CloudTrail InvokeAgent events, made by the humans' console role.
+Locally the loop runs here. What AWS sees: the runtime resource, InvokeAgentRuntime events made
+by the on-call engineers' console role, and the runtime role's own Bedrock model calls.
 """
 
 import uuid
@@ -43,7 +43,6 @@ EVENTS = [
 def handle(rt, event):
     rt.mirror.agent_invoked(
         rt.mirror.assumed_role("ops-console", "oncall-engineer"),
-        rt.state["agent_ids"][rt.spec.name],
         rt.arn,
         session_id=str(uuid.uuid4()),
     )
