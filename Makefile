@@ -11,7 +11,7 @@ run:       ## run the real workloads (real LLM calls) -> traces + AWS-shaped log
 scan:      ## run the crawler
 	uv run agentscan scan --out out/report.json
 eval:      ## score the report against ground truth
-	uv run agentscan eval out/report.json lab/ground_truth.json
+	uv run agentscan eval out/report.json out/ground_truth.json
 demo: up seed run scan eval
 test:
 	uv run pytest -q
