@@ -16,13 +16,14 @@ behind it.
 
 ## Commands
 
-You need Docker, [uv](https://docs.astral.sh/uv/) and an Anthropic API key.
+You need Docker, [uv](https://docs.astral.sh/uv/) and a free Gemini key from
+https://aistudio.google.com/apikey.
 
 ```bash
-cp .env.example .env          # add ANTHROPIC_API_KEY
+cp .env.example .env          # add GEMINI_API_KEY
 make up                       # start the moto server, the OTel collector and Jaeger
 make seed                     # create the fake client account; writes out/ground_truth.json
-make run                      # run the 12 workloads with real model calls, about 100 Haiku calls
+make run                      # run the 12 workloads with real model calls, about 10 minutes
 make scan                     # crawl and classify; writes out/report.json
 make eval                     # accuracy and confusion matrix against the ground truth
 uv run agentscan explain out/report.json invoice-agent   # every piece of evidence for one label
@@ -44,9 +45,8 @@ Half the lab's agents are instrumented and half are not, as the brief asked.
   crawler sees it in the inventory and in CloudTrail's `InvokeAgent` records. `invoice-agent`
   shows its tool loop only in the Bedrock invocation logs.
 
-The Anthropic SDK emits an `anthropic.messages.create` span for every model call. The lab adds
-`execute_tool <tool>` spans for tool runs and `invoke_agent <name>` spans for agent steps. Both
-follow the OpenTelemetry GenAI conventions. Each span carries
+The spans follow the OpenTelemetry GenAI conventions. A model call is a `chat <model>` span, a
+tool run is `execute_tool <tool>` and an agent step is `invoke_agent <name>`. Each span carries
 resource attributes: `service.name`, `cloud.resource_id` for Lambda, `faas.name` and
 `aws.ecs.task.family`.
 
@@ -66,7 +66,7 @@ The crawler answers two questions for every workload.
 The first question is whether it uses a model. These records say yes:
 - CloudTrail shows `InvokeModel` or `Converse` calls made by the workload's role.
 - The Bedrock invocation logs show requests from the workload's role.
-- The app logs show HTTP calls to a model provider, such as `api.anthropic.com`.
+- The app logs show HTTP calls to a model provider, such as `generativelanguage.googleapis.com`.
 - A trace holds a model call span.
 
 The second question is whether the model loops with tools. These records say yes:
@@ -95,8 +95,7 @@ show what a workload could do, so a label built on them alone stays at 0.75 conf
 5. Confidence cap. Confidence never goes above what the strongest evidence allows. The caps are
    0.75 for declared, 0.90 for observed and 0.97 for behavioral evidence.
 6. Review. When confidence is below 0.7, an LLM judge reads the evidence list and gives its
-   verdict. The default judge is `claude-sonnet-5-5`. The scan discards the verdict if it cites
-   no real evidence id. The same caps apply.
+   verdict. The scan discards the verdict if it cites no real evidence id. The same caps apply.
 7. Report. The scan writes `out/report.json`. Every source reports whether it worked, so
    missing access shows up as missing access and not as "no AI found".
 
@@ -131,7 +130,7 @@ owns a workload.
   not raw logs, and must cite it. A black box would be hard to defend in an audit.
 - Names are never evidence. `ai-helper-svc` in the lab is a feature-flag lookup.
 - The lab uses real model calls. Only AWS is fake, and the fake AWS records come from calls that
-  happened. A run costs a few cents of API credit, and it makes the accuracy numbers real.
+  happened. This costs free-tier quota and run time, and it makes the accuracy numbers real.
 
 ## Edge cases
 
@@ -157,7 +156,7 @@ owns a workload.
 ## Results
 
 - The offline suite runs without Docker. It gets 12/12 with every source on and
-  11/12 without traces. The miss is `research-crew`, which calls the Anthropic API directly from ECS.
+  11/12 without traces. The miss is `research-crew`, which calls Gemini directly from ECS.
 
 ## Layout
 
