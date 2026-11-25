@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,10 +26,15 @@ from lab.spec import WORKLOADS, Spec
 
 def run_workload(spec: Spec, state: dict, mirror: AwsMirror, **runtime_kw) -> list:
     mod = importlib.import_module(f"lab.workloads.{spec.module}")
+    events = mod.EVENTS
+    # Free tier: one request shows an agent's loop; LLM apps keep all events, because the
+    # "one call per request" signals need at least three requests.
+    if spec.label == "agent" and (cap := int(os.environ.get("LAB_MAX_AGENT_EVENTS") or 0)):
+        events = events[:cap]
     rt = Runtime(spec, state, mirror, **runtime_kw)
     results = []
     try:
-        for event in mod.EVENTS:
+        for event in events:
             with rt.invocation(f"{spec.name} request"):
                 results.append(mod.handle(rt, event))
     finally:

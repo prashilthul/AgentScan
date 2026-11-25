@@ -74,6 +74,19 @@ def scripted_model(request: httpx2.Request) -> httpx2.Response:
 def scripted_gemini(request: httpx.Request) -> httpx.Response:
     """Same behaviour as scripted_model, speaking the Gemini generateContent wire format."""
     body = json.loads(request.content)
+    # Like Gemini 3+: a function call sent back without its thought signature is rejected.
+    for c in body["contents"]:
+        if any("functionCall" in p and not p.get("thoughtSignature") for p in c.get("parts", [])):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "status": "INVALID_ARGUMENT",
+                        "message": "missing thought_signature",
+                    }
+                },
+            )
     decls = [d for t in body.get("tools") or [] for d in t.get("functionDeclarations", [])]
     rounds = sum(
         1
@@ -83,7 +96,9 @@ def scripted_gemini(request: httpx.Request) -> httpx.Response:
     if decls and rounds < 2:
         d = decls[rounds % len(decls)]
         schema = d.get("parametersJsonSchema") or d.get("parameters") or {}
-        parts = [{"functionCall": {"name": d["name"], "args": _fill(schema)}}]
+        parts = [
+            {"functionCall": {"name": d["name"], "args": _fill(schema)}, "thoughtSignature": "c2ln"}
+        ]
     else:
         parts = [{"text": "ok"}]
     return httpx.Response(
@@ -95,7 +110,7 @@ def scripted_gemini(request: httpx.Request) -> httpx.Response:
                 "candidatesTokenCount": 7,
                 "totalTokenCount": 19,
             },
-            "modelVersion": "gemini-2.5-flash",
+            "modelVersion": "gemini-3.5-flash",
         },
     )
 

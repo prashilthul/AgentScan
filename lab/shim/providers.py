@@ -28,6 +28,9 @@ class Block(BaseModel):
     id: str = ""
     name: str = ""
     input: dict[str, Any] = {}
+    # Gemini 3+ signs each function call and rejects the next turn unless it is sent back.
+    signature: bytes | None = None
+    signed_by: str = ""  # the model that produced the signature
 
 
 class Usage(BaseModel):
@@ -66,9 +69,15 @@ class _RateLimiter:
 
 
 _LIMITER = _RateLimiter(float(os.environ.get("LAB_MIN_INTERVAL", "0")))
+# Documented placeholder for a function call that the current model did not sign itself.
+_FOREIGN_SIGNATURE = b"skip_thought_signature_validator"
 
 
 class GeminiProvider:
+    """LAB_GEMINI_MODEL may list several models, comma-separated. The free tier caps requests
+    per model per day, so when one model's daily quota is spent (or it is overloaded) the
+    provider moves on to the next one."""
+
     name = "gemini"
 
     def __init__(self, tracer, model: str | None = None, httpx_client=None):
@@ -76,11 +85,16 @@ class GeminiProvider:
         from google.genai import types
 
         self.types = types
-        self.model = model or os.environ.get("LAB_GEMINI_MODEL", "gemini-2.5-flash")
+        names = model or os.environ.get("LAB_GEMINI_MODEL", "gemini-3.5-flash")
+        self.models = [m.strip() for m in names.split(",") if m.strip()]
         opts = types.HttpOptions(httpx_client=httpx_client) if httpx_client is not None else None
         self.client = genai.Client(http_options=opts)
         self.tracer = tracer
         _LIMITER.min_interval = float(os.environ.get("LAB_MIN_INTERVAL", "0"))
+
+    @property
+    def model(self) -> str:
+        return self.models[0]
 
     def _contents(self, messages: list[dict]):
         t = self.types
@@ -103,7 +117,10 @@ class GeminiProvider:
                         t.Part(
                             function_call=t.FunctionCall(
                                 id=b["id"], name=b["name"], args=b["input"]
-                            )
+                            ),
+                            thought_signature=b.get("signature")
+                            if b.get("signed_by") == self.model
+                            else _FOREIGN_SIGNATURE,
                         )
                     )
                 elif b["type"] == "tool_result":
@@ -119,7 +136,7 @@ class GeminiProvider:
             out.append(t.Content(role="model" if m["role"] == "assistant" else "user", parts=parts))
         return out
 
-    def create(self, *, messages, system=None, tools=None, max_tokens=2048):
+    def create(self, *, messages, system=None, tools=None, max_tokens=2048, span_attrs=None):
         t = self.types
         config = t.GenerateContentConfig(
             system_instruction=system,
@@ -144,13 +161,14 @@ class GeminiProvider:
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": "gcp.gemini",
             "gen_ai.request.model": self.model,
-        }
+        } | {k: v for k, v in (span_attrs or {}).items() if v}
         with self.tracer.start_as_current_span(f"chat {self.model}", attributes=attrs) as span:
-            resp = self._call(contents=self._contents(messages), config=config)
+            resp = self._call(messages, config)
+            span.set_attribute("gen_ai.response.model", self.model)
             usage = resp.usage_metadata
             out = Response(
                 model=self.model,
-                content=self._blocks(resp),
+                content=self._blocks(resp, self.model),
                 stop_reason="end_turn",
                 usage=Usage(
                     input_tokens=(usage and usage.prompt_token_count) or 0,
@@ -164,21 +182,29 @@ class GeminiProvider:
             span.set_attribute("gen_ai.response.finish_reasons", [out.stop_reason])
         return out
 
-    def _call(self, **kw):
+    def _call(self, messages: list[dict], config):
         from google.genai import errors
 
-        for attempt in range(6):
+        for attempt in range(8):
             _LIMITER.wait()
             try:
-                return self.client.models.generate_content(model=self.model, **kw)
+                # Rebuilt per attempt: signatures depend on which model gets the request.
+                return self.client.models.generate_content(
+                    model=self.model, contents=self._contents(messages), config=config
+                )
             except errors.APIError as e:
-                if e.code not in (429, 500, 503) or attempt == 5:
+                if e.code == 429 and "PerDay" in str(e) and len(self.models) > 1:
+                    self.models.pop(0)  # today's free quota for this model is spent
+                    continue
+                if e.code not in (429, 500, 503) or attempt == 7:
                     raise
-                time.sleep(min(60, 5 * 2**attempt))  # free-tier quota: back off and retry
+                if e.code == 503 and len(self.models) > 1:
+                    self.models.append(self.models.pop(0))  # overloaded: try another first
+                time.sleep(min(60, 5 * 2**attempt))  # free-tier limits: back off and retry
         raise RuntimeError("unreachable")
 
     @staticmethod
-    def _blocks(resp) -> list[Block]:
+    def _blocks(resp, model: str) -> list[Block]:
         blocks: list[Block] = []
         cand = (resp.candidates or [None])[0]
         for p in cand.content.parts if cand and cand.content and cand.content.parts else []:
@@ -190,6 +216,8 @@ class GeminiProvider:
                         id=fc.id or f"call_{uuid.uuid4().hex[:12]}",
                         name=fc.name,
                         input=dict(fc.args or {}),
+                        signature=p.thought_signature,
+                        signed_by=model,
                     )
                 )
             elif p.text and not getattr(p, "thought", False):
@@ -214,5 +242,7 @@ class AnthropicProvider:
             kw["http_client"] = http_client
         self.client = anthropic.Anthropic(**kw)
 
-    def create(self, **request):
+    def create(self, span_attrs=None, **request):
+        # shortcut: the SDK's native spans don't carry aws.request_id, so Anthropic-path calls
+        # aren't merged with their CloudTrail record; add a wrapper span if that matters.
         return self.client.messages.create(model=self.model, **request)
