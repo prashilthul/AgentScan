@@ -7,30 +7,33 @@ source, with a reason.
 
 ## What runs where
 
-`make up` starts three containers. The lab workloads and the crawler run on your machine.
+`make up` starts four containers. The lab workloads and the crawler run on your machine.
 
 | Service | Port | Stands in for | What you can do there |
 |---|---|---|---|
-| moto server | 5000 | the client's AWS account | boto3 talks to it through `AWS_ENDPOINT_URL` |
+| Floci | 4566 | the client's AWS account | boto3 talks to it through `AWS_ENDPOINT_URL` |
 | OTel collector | 4318 | the AWS Distro for OpenTelemetry collector | receives spans over OTLP/HTTP and forwards them to Jaeger |
 | Jaeger | 16686 | AWS X-Ray | open http://localhost:16686 to browse traces |
+| Postgres | 5433 | agentscan's own store | holds every scan and the merged audit trail |
+| Dashboard | 8000 | the report the client reads | `make serve`, then open http://127.0.0.1:8000 |
 
 ## Commands
 
 You need Docker, [uv](https://docs.astral.sh/uv/) and a free Gemini key from
-https://aistudio.google.com/apikey.
+https://aistudio.google.com/apikey. The dashboard build also needs Node and pnpm.
 
 ```bash
 cp .env.example .env          # add GEMINI_API_KEY
-make up                       # start the moto server, the OTel collector and Jaeger
+make up                       # start Floci, the OTel collector, Jaeger and Postgres
 make seed                     # create the fake client account; writes out/ground_truth.json
-make run                      # run the 12 workloads with real model calls, about 10 minutes
+make run                      # run the 12 workloads with real model calls, about 4 minutes
 make scan                     # day one: discovery and configuration only, prints access requests
 uv run agentscan approve iam --by "Asha (CIO)"   # act as the client and approve one source
 make scan                     # scan again; prints what changed and what it still needs
 make approve-all              # approve every source at once
 make eval                     # accuracy and confusion matrix against the ground truth
 uv run agentscan explain out/report.json invoice-agent   # every piece of evidence for one label
+make web && make serve        # build and serve the dashboard
 make test                     # offline test suite, no Docker or key needed
 ```
 
@@ -45,17 +48,17 @@ Half the lab's agents are instrumented and half are not, as the brief asked.
 - `support-agent` and `research-crew` send spans over OTLP/HTTP to the collector on port 4318.
   The collector batches them and exports them to Jaeger. The config is
   `infra/otel-collector.yaml`.
-- `ops-copilot` and `invoice-agent` send nothing. `ops-copilot` is a Bedrock agent, so the
-  crawler sees it in the inventory and in CloudTrail's `InvokeAgent` records. `invoice-agent`
-  shows its tool loop only in the Bedrock invocation logs.
+- `ops-copilot` and `invoice-agent` send nothing. Their activity exists only in CloudTrail and
+  the Bedrock invocation logs that AWS writes.
 
 The spans follow the OpenTelemetry GenAI conventions. A model call is a `chat <model>` span, a
 tool run is `execute_tool <tool>` and an agent step is `invoke_agent <name>`. Each span carries
 resource attributes: `service.name`, `cloud.resource_id` for Lambda, `faas.name` and
-`aws.ecs.task.family`.
+`aws.ecs.task.family`. A span for a Bedrock call also carries `aws.request_id`.
 
-The crawler reads traces from Jaeger's query API. It counts model calls, tool calls and agent
-spans per trace and checks their order. It never reads prompt or completion text.
+The crawler reads traces from Jaeger's query API. It keeps the span type, the model or tool name,
+token counts, the finish reason, the duration and the trace id. It never keeps prompt or
+completion text.
 
 ## How a workload gets its label
 
@@ -88,7 +91,7 @@ show what a workload could do, so a label built on them alone stays at 0.75 conf
    does. Types the crawler can't classify yet, such as EC2 and Step Functions, go into the
    report as "found, not classified yet".
 2. Inventory. The crawler reads the configuration of every Lambda, ECS service, SageMaker
-   endpoint and Bedrock agent. It keeps environment variable names and drops
+   endpoint, Bedrock agent and AgentCore runtime. It keeps environment variable names and drops
    their values.
 3. Grouping. Resources become workloads. A Bedrock agent and the Lambdas that run its tools are
    one workload.
@@ -101,11 +104,13 @@ show what a workload could do, so a label built on them alone stays at 0.75 conf
    in `src/agentscan/signals.py`.
 6. Confidence cap. Confidence never goes above what the strongest evidence allows. The caps are
    0.75 for declared, 0.90 for observed and 0.97 for behavioral evidence.
-7. Review. When confidence is below 0.7, an LLM judge reads the evidence list and gives its
+7. Review. When confidence is below 0.8, an LLM judge reads the evidence list and gives its
    verdict. The scan discards the verdict if it cites no real evidence id. The same caps apply.
 8. Access requests. For every workload below 0.85, the crawler asks for the sources that would
    settle it. Each request names the source, the workloads and the reason.
-9. Report. The scan writes `out/report.json` and lists which labels changed since the last scan.
+9. Audit trail and risk. Spans, CloudTrail records, invocation logs and app logs become one event
+   format in Postgres. Each AI workload gets a high, medium or low risk tier. Each risk factor
+   maps to OWASP Top 10 for LLM Applications 2026 and MITRE ATLAS ids.
 
 ## Which workload owns a record
 
@@ -118,7 +123,7 @@ It never uses names or tags as evidence.
 | CloudTrail record | The caller is an assumed role. If one workload uses that role, it owns the record. If several share the role, the session name must match a Lambda name. Otherwise the record stays unattributed. |
 | Bedrock invocation log | The same role and session rule as CloudTrail. |
 | App log line | The log group belongs to one workload, such as `/aws/lambda/<name>` or `/ecs/<name>`. |
-| Bedrock agent call | The agent id in CloudTrail's `InvokeAgent` record. |
+| AgentCore call | The agent ARN or id in the CloudTrail record. |
 
 A role that several workloads share counts at half weight as evidence, and the report flags it.
 "Who" in this sense is the AWS identity that made the call. The crawler does not know which team
@@ -167,13 +172,15 @@ owns a workload.
 
 - The offline suite runs without Docker. It gets 12/12 with every source on and
   11/12 without traces. The miss is `research-crew`, which calls Gemini directly from ECS.
-- Approving nothing, then IAM, CloudTrail, invocation logs, app logs and traces in turn gives 6,
-  8, 8, 10, 11 and 12 correct out of 12 in the offline suite.
+- Live on Floci with real Gemini calls, the day-one scan got 6 of 12 right and the scan with
+  every source approved got 12 of 12. Four sources stored 92 records, one per source per call.
 
 ## Layout
 
 ```
-src/agentscan/   the crawler: collectors, correlate, signals, scoring, judge, access, cli
+src/agentscan/   the crawler: collectors, correlate, signals, scoring, judge, access,
+                 audit, store, risk, api, cli
+web/             the dashboard, a static Next.js export that agentscan serve hosts
 lab/             the fake client account: spec.py holds the ground truth
 tests/           offline end-to-end and unit tests
 infra/           the OTel collector config
