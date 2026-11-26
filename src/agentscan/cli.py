@@ -67,7 +67,7 @@ def scan(
     ] = None,
     judge: Annotated[bool, typer.Option(help="Ask an LLM to review low-confidence results")] = True,
     judge_model: Annotated[str | None, typer.Option(help="Model for the judge")] = None,
-    judge_provider: Annotated[str | None, typer.Option(help="gemini | anthropic")] = None,
+    judge_provider: Annotated[str | None, typer.Option(help="gemini | anthropic | openai")] = None,
     judge_threshold: Annotated[
         float, typer.Option(help="Judge results below this confidence")
     ] = 0.8,
@@ -96,7 +96,9 @@ def scan(
     reviewer = None
     if judge:
         provider = judge_provider or os.environ.get("JUDGE_PROVIDER", "gemini")
-        default_model = "gemini-3.5-flash" if provider == "gemini" else "claude-sonnet-5-5"
+        default_model = {"gemini": "gemini-3.5-flash", "openai": "glm-5.3-flash"}.get(
+            provider, "claude-sonnet-5-5"
+        )
         reviewer = Judge(
             judge_model or os.environ.get("JUDGE_MODEL", default_model),
             provider=provider,

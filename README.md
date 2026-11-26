@@ -174,10 +174,13 @@ owns a workload.
 
 ## Results
 
-- The offline suite runs without Docker. It gets 12/12 with every source on and
+- The offline suite has 35 tests and runs without Docker. It gets 12/12 with every source on and
   11/12 without traces. The miss is `research-crew`, which calls Gemini directly from ECS.
-- Live on Floci with real Gemini calls, the day-one scan got 6 of 12 right and the scan with
-  every source approved got 12 of 12. Four sources stored 92 records, one per source per call.
+- On 26 Nov I ran the full flow on Floci with real Gemini calls. The judge ran on BharatCode's
+  `glm-5.3-flash`. Approving IAM, CloudTrail, invocation logs, app logs and traces in turn gave
+  7, 8, 9, 11, 11 and 12 correct out of 12. The open access requests went 4, 4, 3, 2, 1 and 0.
+- The six scans stored 92 source records, which merge into 59 distinct calls. One Bedrock call
+  seen by three sources counts once.
 
 ## Layout
 

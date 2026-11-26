@@ -218,3 +218,22 @@ def test_collector_failure_is_contained():
     assert snap.sources[-1].name == "weird"
     assert not snap.sources[-1].ok
     assert "ValueError" in snap.sources[-1].detail
+
+
+def test_judge_retries_when_rate_limited(monkeypatch):
+    from agentscan import judge as judge_mod
+
+    monkeypatch.setattr(judge_mod.time, "sleep", lambda _s: None)
+    j = _judge("")
+    calls = []
+
+    def flaky(_prompt):
+        calls.append(1)
+        if len(calls) < 3:
+            raise judge_mod.JudgeUnavailable("HTTP 429", retry=True)
+        return '```json\n{"ok": 1}\n```', "fake"
+
+    j._ask = flaky
+    text, _ = j._ask_with_retry("p")
+    assert len(calls) == 3
+    assert judge_mod._json_text(text) == '{"ok": 1}'

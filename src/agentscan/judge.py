@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
 
 from agentscan.models import Category, Classification, Evidence, JudgeVerdict, Workload
 from agentscan.scoring import CONFIDENCE_CAP, _supporting, best_tier
@@ -69,11 +71,26 @@ def _bundle(wl: Workload, evidence: list[Evidence], rules: Classification) -> st
 
 
 class JudgeUnavailable(Exception):
-    pass
+    def __init__(self, msg: str, retry: bool = False):
+        super().__init__(msg)
+        self.retry = retry  # rate limit / overloaded: worth asking again after a pause
+
+
+RETRY_STATUS = {429, 500, 502, 503, 504}
+BACKOFF = (5, 15, 30)  # seconds; free tiers and shared-capacity APIs need a slow retry
+
+
+def _json_text(text: str) -> str:
+    """Models without schema enforcement sometimes wrap JSON in a ``` fence."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return t
 
 
 class Judge:
-    """provider: "gemini" (Google AI Studio, free tier) or "anthropic"."""
+    """provider: "gemini" (Google AI Studio, free tier), "anthropic", or "openai" (any
+    OpenAI-compatible endpoint: JUDGE_BASE_URL + JUDGE_API_KEY)."""
 
     def __init__(self, model: str, threshold: float = 0.8, provider: str = "gemini"):
         self.model = model
@@ -86,7 +103,15 @@ class Judge:
         if self.client is not None:
             return self.client
         try:
-            if self.provider == "anthropic":
+            if self.provider == "openai":
+                import httpx
+
+                self.client = httpx.Client(
+                    base_url=os.environ["JUDGE_BASE_URL"],
+                    headers={"Authorization": f"Bearer {os.environ['JUDGE_API_KEY']}"},
+                    timeout=120,
+                )
+            elif self.provider == "anthropic":
                 import anthropic
 
                 self.client = anthropic.Anthropic()
@@ -94,13 +119,15 @@ class Judge:
                 from google import genai
 
                 self.client = genai.Client()
-        except Exception as e:  # noqa: BLE001 - a missing key must not stop a scan
+        except Exception as e:  # noqa: BLE001 - a missing key/URL must not stop a scan
             raise JudgeUnavailable(f"client unavailable: {type(e).__name__}") from e
         return self.client
 
     def _ask(self, prompt: str) -> tuple[str, str]:
         """Return (json text, model that answered)."""
         client = self._connect()
+        if self.provider == "openai":
+            return self._ask_openai(client, prompt)
         if self.provider == "anthropic":
             import anthropic
 
@@ -117,6 +144,10 @@ class Judge:
                     system=SYSTEM,
                     messages=[{"role": "user", "content": prompt}],
                 )
+            except anthropic.APIStatusError as e:
+                raise JudgeUnavailable(
+                    f"{type(e).__name__} {e.status_code}", e.status_code in RETRY_STATUS
+                ) from e
             except anthropic.APIError as e:
                 raise JudgeUnavailable(type(e).__name__) from e
             except Exception as e:  # noqa: BLE001 - auth/network errors degrade to rules
@@ -139,10 +170,46 @@ class Judge:
                 ),
             )
         except errors.APIError as e:
-            raise JudgeUnavailable(f"{type(e).__name__} {e.code}") from e
+            raise JudgeUnavailable(f"{type(e).__name__} {e.code}", e.code in RETRY_STATUS) from e
         except Exception as e:  # noqa: BLE001 - auth/network errors degrade to rules
             raise JudgeUnavailable(type(e).__name__) from e
         return resp.text or "", self.model
+
+    def _ask_openai(self, client, prompt: str) -> tuple[str, str]:
+        import httpx
+
+        body = {
+            "model": self.model,
+            "max_tokens": 4000,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"{SYSTEM}\n\nReply with one JSON object only, matching this "
+                    f"schema:\n{json.dumps(SCHEMA)}",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        }
+        try:
+            r = client.post("/chat/completions", json=body)
+        except httpx.HTTPError as e:
+            raise JudgeUnavailable(type(e).__name__, retry=True) from e
+        if r.status_code != 200:
+            raise JudgeUnavailable(f"HTTP {r.status_code}", r.status_code in RETRY_STATUS)
+        choice = r.json()["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise JudgeUnavailable("stopped: output limit")
+        return _json_text(choice["message"].get("content") or ""), r.json().get("model", self.model)
+
+    def _ask_with_retry(self, prompt: str) -> tuple[str, str]:
+        for wait in (*BACKOFF, None):
+            try:
+                return self._ask(prompt)
+            except JudgeUnavailable as e:
+                if not e.retry or wait is None:
+                    raise
+                time.sleep(wait)
+        raise AssertionError("unreachable")
 
     def review(
         self, wl: Workload, evidence: list[Evidence], rules: Classification
@@ -150,7 +217,7 @@ class Judge:
         if rules.confidence >= self.threshold or not evidence:
             return rules
         try:
-            text, model = self._ask(_bundle(wl, evidence, rules))
+            text, model = self._ask_with_retry(_bundle(wl, evidence, rules))
             raw = json.loads(text)
         except JudgeUnavailable as e:
             rules.rationale += f" (LLM judge unavailable: {e})"
