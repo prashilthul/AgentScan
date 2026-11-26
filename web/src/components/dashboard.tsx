@@ -25,12 +25,18 @@ const SOURCE_TEXT: Record<string, string> = {
   "bedrock-invocation-log": "Bedrock invocation logs",
   "app-log": "CloudWatch app logs",
 };
-const ACTION_TEXT: Record<string, string> = {
-  model_call: "model calls",
-  tool_call: "tool calls",
-  tool_requested: "tools requested",
-  agent_step: "agent steps",
-  agent_invoked: "agent invocations",
+const SOURCE_SHORT: Record<string, string> = {
+  otel: "OTel",
+  cloudtrail: "CloudTrail",
+  "bedrock-invocation-log": "Invocation log",
+  "app-log": "App log",
+};
+const ACTION_TEXT: Record<string, [string, string]> = {
+  model_call: ["model call", "model calls"],
+  tool_call: ["tool call", "tool calls"],
+  tool_requested: ["tool requested", "tools requested"],
+  agent_step: ["agent step", "agent steps"],
+  agent_invoked: ["agent invocation", "agent invocations"],
 };
 
 function TierBadge({ tier }: { tier?: Tier }) {
@@ -60,7 +66,7 @@ function Bars({ data, label }: { data: Record<string, number>; label: string }) 
         <li key={name}>
           <div className="flex justify-between gap-4 text-sm">
             <span>{name}</span>
-            <span className="tabular-nums text-muted-foreground">
+            <span className="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground">
               {n} workload{n === 1 ? "" : "s"}
             </span>
           </div>
@@ -73,8 +79,10 @@ function Bars({ data, label }: { data: Record<string, number>; label: string }) 
   );
 }
 
+const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 function activityText(a: Record<string, number>) {
-  const parts = Object.entries(a).map(([k, n]) => `${n} ${ACTION_TEXT[k] ?? k}`);
+  const parts = Object.entries(a).map(([k, n]) => `${n} ${ACTION_TEXT[k]?.[n === 1 ? 0 : 1] ?? k}`);
   return parts.length ? parts.join(", ") : "none seen";
 }
 
@@ -113,6 +121,11 @@ function Detail({ name, onClose }: { name: string; onClose: () => void }) {
                 {LABEL_TEXT[d.classification.category]} ·{" "}
                 {(d.classification.confidence * 100).toFixed(0)}% confidence ({d.classification.basis ?? "no"} evidence)
               </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {d.classification.judge
+                  ? `Rules were unsure, so the LLM judge (${d.classification.judge.model}) reviewed the evidence and made this call.`
+                  : "Decided by the rules engine; the LLM judge was not needed."}
+              </p>
               <p className="mt-1 text-muted-foreground">{d.classification.rationale}</p>
             </section>
             {d.risk && (
@@ -154,7 +167,7 @@ function Detail({ name, onClose }: { name: string; onClose: () => void }) {
             <section>
               <h3 className="font-medium">Audit trail ({d.events.length} most recent)</h3>
               <div className="mt-2 max-h-72 overflow-auto rounded-md border">
-                <Table>
+                <Table className="text-xs">
                   <TableHeader>
                     <TableRow>
                       <TableHead>When</TableHead>
@@ -169,11 +182,11 @@ function Detail({ name, onClose }: { name: string; onClose: () => void }) {
                         <TableCell className="tabular-nums">
                           {new Date(e.occurred_at).toLocaleTimeString()}
                         </TableCell>
-                        <TableCell>{(ACTION_TEXT[e.action] ?? e.action).replace(/s$/, "")}</TableCell>
-                        <TableCell className="max-w-40 truncate" title={e.target}>
+                        <TableCell>{ACTION_TEXT[e.action]?.[0] ?? e.action}</TableCell>
+                        <TableCell className="max-w-28 truncate" title={e.target}>
                           {e.target}
                         </TableCell>
-                        <TableCell>{SOURCE_TEXT[e.source] ?? e.source}</TableCell>
+                        <TableCell>{SOURCE_SHORT[e.source] ?? e.source}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -356,82 +369,132 @@ export default function Dashboard() {
             </Card>
           </div>
 
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Where the audit trail comes from</CardTitle>
-                <CardDescription>
-                  Instrumented agents send OpenTelemetry to a collector; the rest are read from
-                  what AWS records. One Bedrock call seen by several sources counts once.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-1 text-sm">
-                {Object.entries(bySource).map(([s, n]) => (
-                  <div key={s} className="flex justify-between">
-                    <span>{SOURCE_TEXT[s] ?? s}</span>
-                    <span className="tabular-nums text-muted-foreground">{n} records</span>
-                  </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Data sources and approvals</CardTitle>
+              <CardDescription>
+                Every source the crawler read, whether it worked, and who on the client side
+                approved the optional ones.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              {Object.entries(data.approvals)
+                  .sort(([, x], [, y]) => x.approved_at.localeCompare(y.approved_at))
+                  .map(([src, g]) => (
+                <div key={src} className="flex justify-between gap-3">
+                  <span className="font-medium">{src}</span>
+                  <span className="text-right text-muted-foreground">
+                    {g.approved_by}, {new Date(g.approved_at).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+              {data.coverage.missing.map((src) => (
+                <div key={src} className="flex justify-between gap-3">
+                  <span className="font-medium">{src}</span>
+                  <span className="text-muted-foreground">not approved</span>
+                </div>
+              ))}
+              <ul className="flex flex-wrap gap-1 pt-2">
+                {data.sources.map((src) => (
+                  <li key={src.name}>
+                    <Badge
+                      variant={src.ok ? "outline" : "destructive"}
+                      className="font-normal"
+                      title={src.detail || (src.ok ? "read without errors" : "failed")}
+                    >
+                      {src.ok ? "✓" : "✗"} {src.name.split("@")[0]}
+                    </Badge>
+                  </li>
                 ))}
-                <p className="pt-2 text-muted-foreground">
-                  Distinct actions: {activityText(data.activity)}.
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Open items</CardTitle>
-                <CardDescription>What the crawler can&apos;t see yet, and what changed</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                {data.access_requests.map((r) => (
-                  <div key={r.source}>
-                    <p className="font-medium">
-                      Access request: {r.source} <span className="text-muted-foreground">({r.status})</span>
-                    </p>
-                    <p className="text-muted-foreground">{r.why}</p>
-                  </div>
-                ))}
-                {data.unclassified.map((u) => (
-                  <p key={u.arn}>
-                    Found, not classified yet: <span className="font-medium">{u.type}</span>{" "}
-                    <span className="break-all text-muted-foreground">{u.arn.split(":").at(-1)}</span>
+              </ul>
+              {data.sources
+                .filter((src) => !src.ok)
+                .map((src) => (
+                  <p key={src.name} className="text-destructive">
+                    {src.name}: {src.detail}
                   </p>
                 ))}
-                {data.changes.slice(0, 6).map((c) => (
-                  <p key={c} className="text-muted-foreground">
-                    Changed: {c}
-                  </p>
-                ))}
-                {!data.access_requests.length && !data.unclassified.length && !data.changes.length && (
-                  <p className="text-muted-foreground">Nothing open.</p>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
-        <aside aria-label="Workload details">
+        <aside className="min-w-0 space-y-6" aria-label="Workload details, scan history and open items">
           {selected ? (
             <Detail key={selected} name={selected} onClose={() => setSelected(null)} />
           ) : (
-            <Card className="lg:sticky lg:top-6">
+            <Card>
               <CardHeader>
                 <CardTitle>Scan history</CardTitle>
                 <CardDescription>Each scan is kept; nothing is overwritten.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
                 {data.scans.map((s) => (
-                  <div key={s.id} className="flex justify-between gap-2">
-                    <span className="tabular-nums">{new Date(s.generated_at).toLocaleString()}</span>
-                    <span className="text-muted-foreground">
-                      {s.summary.agent}a / {s.summary.llm}l / {s.summary.service}s ·{" "}
-                      {s.grants.length} sources
-                    </span>
+                  <div key={s.id}>
+                    <p className="tabular-nums">{new Date(s.generated_at).toLocaleString()}</p>
+                    <p className="text-muted-foreground">
+                      {count(s.summary.agent, "agent")} · {count(s.summary.llm, "LLM app")} ·{" "}
+                      {count(s.summary.service, "service")} ·{" "}
+                      {s.grants.length} of {optional} sources
+                    </p>
                   </div>
                 ))}
               </CardContent>
             </Card>
           )}
+          <Card>
+            <CardHeader>
+              <CardTitle>Open items</CardTitle>
+              <CardDescription>What the crawler can&apos;t see yet, and what changed</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              {data.access_requests.map((r) => (
+                <div key={r.source}>
+                  <p className="font-medium">
+                    Access request: {r.source} <span className="text-muted-foreground">({r.status})</span>
+                  </p>
+                  <p className="text-muted-foreground">{r.why}</p>
+                </div>
+              ))}
+              {data.unclassified.map((u) => (
+                <div key={u.arn}>
+                  <p>
+                    Found, not classified yet: <span className="font-medium">{u.type}</span>
+                  </p>
+                  <p className="truncate text-muted-foreground" title={u.arn}>
+                    {u.arn.split(":").at(-1)}
+                  </p>
+                </div>
+              ))}
+              {data.changes.slice(0, 6).map((c) => (
+                <p key={c} className="text-muted-foreground">
+                  Changed: {c}
+                </p>
+              ))}
+              {!data.access_requests.length && !data.unclassified.length && !data.changes.length && (
+                <p className="text-muted-foreground">Nothing open.</p>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Where the audit trail comes from</CardTitle>
+              <CardDescription>
+                Instrumented agents send OpenTelemetry to a collector; the rest are read from
+                what AWS records. One Bedrock call seen by several sources counts once.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-1 text-sm">
+              {Object.entries(bySource).map(([s, n]) => (
+                <div key={s} className="flex justify-between">
+                  <span>{SOURCE_TEXT[s] ?? s}</span>
+                  <span className="tabular-nums text-muted-foreground">{n} records</span>
+                </div>
+              ))}
+              <p className="pt-2 text-muted-foreground">
+                Distinct actions: {activityText(data.activity)}.
+              </p>
+            </CardContent>
+          </Card>
         </aside>
       </div>
     </main>

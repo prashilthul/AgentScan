@@ -51,6 +51,8 @@ export interface Overview {
   events_by_source: { source: string; action: string; n: number }[];
   distinct_events: number;
   coverage: { granted: string[]; missing: string[]; failed: string[] };
+  approvals: Record<string, { approved_by: string; approved_at: string; note: string }>;
+  sources: { name: string; ok: boolean; detail: string }[];
   access_requests: AccessRequest[];
   unclassified: { arn: string; type: string; region: string }[];
   changes: string[];
@@ -81,7 +83,14 @@ export interface AuditEvent {
 
 export interface WorkloadDetail {
   workload: { id: string; name: string; notes: string[]; primary: { type: string } };
-  classification: { category: Label; confidence: number; basis: string | null; rationale: string };
+  classification: {
+    category: Label;
+    confidence: number;
+    basis: string | null;
+    rationale: string;
+    method: string;
+    judge: { model: string } | null;
+  };
   evidence: Evidence[];
   risk: Risk | null;
   events: AuditEvent[];

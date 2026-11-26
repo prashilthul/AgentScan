@@ -75,6 +75,8 @@ def overview(
             "missing": sorted(optional - granted),
             "failed": [s["name"] for s in sources if not s["ok"]],
         },
+        "approvals": report.get("grants") or {},
+        "sources": [{"name": s["name"], "ok": s["ok"], "detail": s["detail"]} for s in sources],
         "access_requests": report.get("access_requests", []),
         "unclassified": report.get("unclassified", []),
         "changes": report.get("changes", []),
