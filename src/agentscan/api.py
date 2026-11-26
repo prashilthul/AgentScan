@@ -20,7 +20,9 @@ WEB = Path(__file__).resolve().parents[2] / "web" / "out"
 TIER_ORDER = {"high": 0, "medium": 1, "low": 2, None: 3}
 
 
-def overview(report: dict[str, Any], counts: list[dict], scans: list[dict]) -> dict[str, Any]:
+def overview(
+    report: dict[str, Any], counts: list[dict], scans: list[dict], distinct_events: int
+) -> dict[str, Any]:
     """The executive view, derived from one report."""
     results = report["results"]
     ai = [r for r in results if r["classification"]["category"] != "service"]
@@ -67,6 +69,7 @@ def overview(report: dict[str, Any], counts: list[dict], scans: list[dict]) -> d
         "atlas": dict(atlas.most_common()),
         "activity": dict(activity),
         "events_by_source": counts,
+        "distinct_events": distinct_events,
         "coverage": {
             "granted": sorted(granted & optional),
             "missing": sorted(optional - granted),
@@ -96,7 +99,9 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/api/overview")
     def get_overview():
-        return overview(latest(), store.event_counts(), store.scans(20))
+        return overview(
+            latest(), store.event_counts(), store.scans(20), store.distinct_event_count()
+        )
 
     @app.get("/api/workloads/{name}")
     def get_workload(name: str):
@@ -107,7 +112,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/api/events")
     def get_events(limit: int = 200):
-        return store.events(limit=min(limit, 2000))
+        return store.events(limit=max(0, min(limit, 2000)))
 
     @app.get("/api/scans")
     def get_scans():

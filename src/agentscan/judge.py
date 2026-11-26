@@ -10,6 +10,7 @@ The judge is a reviewer, not the classifier:
 from __future__ import annotations
 
 import json
+import math
 
 from agentscan.models import Category, Classification, Evidence, JudgeVerdict, Workload
 from agentscan.scoring import CONFIDENCE_CAP, _supporting, best_tier
@@ -74,26 +75,37 @@ class JudgeUnavailable(Exception):
 class Judge:
     """provider: "gemini" (Google AI Studio, free tier) or "anthropic"."""
 
-    def __init__(self, model: str, threshold: float = 0.7, provider: str = "gemini"):
+    def __init__(self, model: str, threshold: float = 0.8, provider: str = "gemini"):
         self.model = model
         self.threshold = threshold
         self.provider = provider
-        if provider == "anthropic":
-            import anthropic
+        self.client: object | None = None
 
-            self.client = anthropic.Anthropic()
-        else:
-            from google import genai
+    def _connect(self):
+        """Build the SDK client on first use; missing credentials degrade to rules."""
+        if self.client is not None:
+            return self.client
+        try:
+            if self.provider == "anthropic":
+                import anthropic
 
-            self.client = genai.Client()
+                self.client = anthropic.Anthropic()
+            else:
+                from google import genai
+
+                self.client = genai.Client()
+        except Exception as e:  # noqa: BLE001 - a missing key must not stop a scan
+            raise JudgeUnavailable(f"client unavailable: {type(e).__name__}") from e
+        return self.client
 
     def _ask(self, prompt: str) -> tuple[str, str]:
         """Return (json text, model that answered)."""
+        client = self._connect()
         if self.provider == "anthropic":
             import anthropic
 
             try:
-                resp = self.client.beta.messages.create(
+                resp = client.beta.messages.create(
                     model=self.model,
                     max_tokens=4000,
                     betas=["server-side-fallback-2026-07-01"],
@@ -107,6 +119,8 @@ class Judge:
                 )
             except anthropic.APIError as e:
                 raise JudgeUnavailable(type(e).__name__) from e
+            except Exception as e:  # noqa: BLE001 - auth/network errors degrade to rules
+                raise JudgeUnavailable(type(e).__name__) from e
             if resp.stop_reason != "end_turn":
                 raise JudgeUnavailable(f"stopped: {resp.stop_reason}")
             return next((b.text for b in resp.content if b.type == "text"), ""), resp.model
@@ -114,7 +128,7 @@ class Judge:
         from google.genai import errors, types
 
         try:
-            resp = self.client.models.generate_content(
+            resp = client.models.generate_content(
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -126,6 +140,8 @@ class Judge:
             )
         except errors.APIError as e:
             raise JudgeUnavailable(f"{type(e).__name__} {e.code}") from e
+        except Exception as e:  # noqa: BLE001 - auth/network errors degrade to rules
+            raise JudgeUnavailable(type(e).__name__) from e
         return resp.text or "", self.model
 
     def review(
@@ -143,20 +159,39 @@ class Judge:
             rules.rationale += " (LLM judge returned invalid JSON)"
             return rules
 
+        if not isinstance(raw, dict):
+            rules.rationale += " (LLM judge verdict discarded: not a JSON object)"
+            return rules
+
         known = {e.id for e in evidence}
-        cited = [i for i in raw.get("cited_evidence", []) if i in known]
+        raw_cited = raw.get("cited_evidence")
+        cited = (
+            [i for i in raw_cited if isinstance(i, str) and i in known]
+            if isinstance(raw_cited, list)
+            else []
+        )
         if not cited:  # an uncited verdict is not auditable: keep the rules result
             rules.rationale += " (LLM judge verdict discarded: no valid evidence cited)"
             return rules
 
-        category = Category(raw["category"])
+        try:
+            category = Category(raw["category"])
+            confidence = float(raw["confidence"])
+            rationale = str(raw.get("rationale") or "").strip()
+        except (KeyError, TypeError, ValueError):
+            rules.rationale += " (LLM judge verdict discarded: malformed verdict)"
+            return rules
+        if not math.isfinite(confidence) or not rationale:
+            rules.rationale += " (LLM judge verdict discarded: malformed verdict)"
+            return rules
+
         basis = best_tier(_supporting(category, evidence))
         cap = CONFIDENCE_CAP[basis]
         verdict = JudgeVerdict(
             category=category,
-            confidence=round(min(float(raw["confidence"]), cap), 3),
+            confidence=round(max(0.0, min(confidence, cap)), 3),
             cited_evidence=cited,
-            rationale=raw["rationale"],
+            rationale=rationale,
             model=model,
         )
         return rules.model_copy(

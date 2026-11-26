@@ -24,7 +24,7 @@ SETTLED = 0.85
 class Access:
     permissions: list[str]
     reads: str
-    never_reads: str
+    not_kept: str  # content never stored, even when it must be read transiently to match
     why: str  # the reason given to the client in a request
 
 
@@ -67,7 +67,8 @@ CATALOG: dict[str, Access] = {
     "app-logs": Access(
         ["logs:FilterLogEvents (these workloads' log groups only)"],
         "HTTP calls to known LLM provider hosts and calls per invocation",
-        "any other log content",
+        "anything beyond the matched host, timestamp and request id (lines are matched "
+        "transiently, not stored)",
         "These workloads show signs of model use that CloudTrail can't see, e.g. calling "
         "OpenAI, Anthropic or Gemini directly. Their logs show those calls.",
     ),
@@ -135,12 +136,18 @@ def requests(results: list[WorkloadResult], sources: list[SourceStatus]) -> list
     out = []
     for name, acc in CATALOG.items():
         statuses = [s for s in sources if s.name == name]
-        if any(s.ok for s in statuses):
+        # A source that ran in several regions is usable only if every region succeeded;
+        # otherwise a partial failure would silently look like full coverage.
+        if statuses and all(s.ok for s in statuses):
             continue
         wanted = [r.workload.name for r in results if _wants(name, r)]
         if not wanted:
             continue
-        status = f"approved but failed: {statuses[0].detail}" if statuses else "not approved"
+        if not statuses:
+            status = "not approved"
+        else:
+            failed = next((s for s in statuses if not s.ok), statuses[0])
+            status = f"approved but failed: {failed.detail}"
         out.append(
             AccessRequest(
                 source=name,

@@ -70,7 +70,7 @@ def scan(
     judge_provider: Annotated[str | None, typer.Option(help="gemini | anthropic")] = None,
     judge_threshold: Annotated[
         float, typer.Option(help="Judge results below this confidence")
-    ] = 0.7,
+    ] = 0.8,
     grants: Annotated[
         Path, typer.Option(help="Approved sources (see `agentscan approve`)")
     ] = GRANTS,
@@ -180,7 +180,7 @@ def approve(
     if source not in access.CATALOG:
         raise typer.BadParameter(f"unknown source {source!r}; one of {', '.join(OPTIONAL_SOURCES)}")
     acc = access.CATALOG[source]
-    console.print(f"[bold]{source}[/]\n  reads: {acc.reads}\n  never reads: {acc.never_reads}")
+    console.print(f"[bold]{source}[/]\n  reads: {acc.reads}\n  never stores: {acc.not_kept}")
     console.print(f"  permissions: {', '.join(acc.permissions)}")
     try:
         pending = Report.model_validate_json(report_path.read_text()).access_requests

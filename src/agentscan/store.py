@@ -179,3 +179,16 @@ class Store:
             "SELECT source, action, COUNT(*) AS n FROM audit_events GROUP BY source, action "
             "ORDER BY source, action"
         )
+
+    def distinct_event_count(self) -> int:
+        """Calls, not source rows: one Bedrock call seen by three sources counts once.
+
+        Only model calls share a call_id across sources. A tool or agent step keeps its own
+        row id even if a framework happens to copy the model request id onto it.
+        """
+        rows = self._query(
+            "SELECT COUNT(DISTINCT CASE "
+            "WHEN action = 'model_call' AND call_id IS NOT NULL AND call_id <> '' "
+            "THEN call_id ELSE id END) AS n FROM audit_events"
+        )
+        return int(rows[0]["n"]) if rows else 0

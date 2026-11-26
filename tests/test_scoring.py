@@ -1,11 +1,22 @@
 """Unit tests for the scoring policy and the judge's guardrails."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from agentscan.judge import Judge
-from agentscan.models import Category, Evidence, Resource, Tier, Workload
+from agentscan.models import (
+    AccountSnapshot,
+    Category,
+    Evidence,
+    Resource,
+    RolePolicy,
+    SourceStatus,
+    Tier,
+    Workload,
+)
+from agentscan.scan import _run
 from agentscan.scoring import classify
-from agentscan.signals import WEIGHTS, reconcile
+from agentscan.signals import WEIGHTS, extract, reconcile
 
 
 def ev(signal: str, i: int = 1) -> Evidence:
@@ -85,7 +96,7 @@ class _FakeClient:
 
 def _judge(text: str) -> Judge:
     j = Judge.__new__(Judge)
-    j.model, j.threshold, j.client, j.provider = "fake", 0.7, _FakeClient(text), "anthropic"
+    j.model, j.threshold, j.client, j.provider = "fake", 0.8, _FakeClient(text), "anthropic"
     return j
 
 
@@ -123,3 +134,87 @@ def test_judge_skipped_when_rules_are_confident():
     rules = classify(evidence)
     out = _judge("not json").review(WL, evidence, rules)
     assert out is rules
+
+
+def test_judge_needs_no_credentials_to_be_constructed():
+    # The client is built on first use, so a scan without a judge key still gets rule labels.
+    job = Judge("fake-model", provider="anthropic")
+    assert job.client is None
+    assert job.threshold == 0.8
+
+
+def test_judge_malformed_verdict_is_discarded():
+    evidence = [ev("config.llm_env", 1)]
+    rules = classify(evidence)
+    out = _judge(
+        '{"category":"not-a-label","confidence":0.99,"cited_evidence":["E1"],"rationale":"x"}'
+    ).review(WL, evidence, rules)
+    assert out.method == "rules"
+    assert "malformed" in out.rationale
+
+
+def test_judge_non_object_verdict_is_discarded():
+    evidence = [ev("config.llm_env", 1)]
+    rules = classify(evidence)
+    out = _judge('["agent"]').review(WL, evidence, rules)
+    assert out.method == "rules"
+
+
+# ---------------------------------------------------------------- coverage guardrails
+
+
+ROLE = "arn:aws:iam::123456789012:role/app"
+WL_ROLE = Workload(
+    id="arn:aws:lambda:us-east-1:123456789012:function:app",
+    name="app",
+    primary=Resource(
+        arn="arn:aws:lambda:us-east-1:123456789012:function:app",
+        type="lambda.function",
+        name="app",
+        region="us-east-1",
+        role_arn=ROLE,
+    ),
+)
+
+
+def _snap(trail_regions: list[str]) -> AccountSnapshot:
+    return AccountSnapshot(
+        account_id="123456789012",
+        regions=["us-east-1"],
+        collected_at=datetime.now(UTC),
+        lookback_hours=24,
+        role_policies={
+            ROLE: RolePolicy(
+                role_arn=ROLE,
+                statements=[
+                    {
+                        "effect": "Allow",
+                        "actions": ["bedrock:invokemodel"],
+                        "resources": ["*"],
+                    }
+                ],
+            )
+        },
+        sources=[SourceStatus(name="cloudtrail", ok=True, detail="")],
+        cloudtrail_trail_regions=trail_regions,
+    )
+
+
+def test_management_only_cloudtrail_cannot_prove_unused_permission():
+    full = extract(WL_ROLE, _snap(["us-east-1"]))
+    assert any(e.signal == "cloudtrail.permission_unused" for e in full)
+    # LookupEvents sees management events only; Bedrock model calls are data events.
+    partial = extract(WL_ROLE, _snap([]))
+    assert not any(e.signal == "cloudtrail.permission_unused" for e in partial)
+
+
+def test_collector_failure_is_contained():
+    snap = _snap([])
+
+    def boom():
+        raise ValueError("bad response")
+
+    _run(snap, "weird", boom)
+    assert snap.sources[-1].name == "weird"
+    assert not snap.sources[-1].ok
+    assert "ValueError" in snap.sources[-1].detail

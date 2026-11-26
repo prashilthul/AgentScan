@@ -63,6 +63,17 @@ def test_approved_source_that_fails_is_raised_again(lab):
     assert reqs["traces"].status == "not approved"
 
 
+def test_partial_regional_failure_is_asked_again(lab):
+    report = _day(lab, ["iam"])
+    sources = [
+        *report.sources,
+        SourceStatus(name="cloudtrail", ok=True, detail="us-east-1 ok"),
+        SourceStatus(name="cloudtrail", ok=False, detail="AccessDenied in eu-west-1"),
+    ]
+    reqs = {r.source: r for r in requests(report.results, sources)}
+    assert reqs["cloudtrail"].status == "approved but failed: AccessDenied in eu-west-1"
+
+
 def test_approval_is_recorded_with_a_name(tmp_path):
     path = tmp_path / "grants.json"
     approve(path, "cloudtrail", by="Asha (CIO)", note="CHG-1042")

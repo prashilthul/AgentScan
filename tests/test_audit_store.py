@@ -1,11 +1,13 @@
 """Merged audit trail, append-only store, risk tiers and the dashboard API, offline."""
 
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agentscan.api import create_app
+from agentscan.models import AuditEvent
 from agentscan.store import Store
 from tests.test_end_to_end import _run_lab, _scan
 
@@ -95,6 +97,27 @@ def test_store_is_append_only_and_idempotent(report, tmp_path):
                 raw.execute(sql)
 
 
+def test_tool_call_is_not_merged_into_its_model_call(report, tmp_path):
+    now = datetime.now(UTC)
+    model = AuditEvent(
+        id="model",
+        account_id="1",
+        workload_id=None,
+        workload=None,
+        occurred_at=now,
+        source="otel",
+        action="model_call",
+        target="m",
+        actor="svc",
+        call_id="req-1",
+    )
+    tool = model.model_copy(update={"id": "tool", "action": "tool_call", "target": "t"})
+    store = Store(str(tmp_path / "calls.db"))
+    store.save(report.model_copy(update={"audit_events": [model, tool]}))
+    # The tool span reused the model's request id, but it is still a second event.
+    assert store.distinct_event_count() == 2
+
+
 def test_api_overview_and_workload(report, tmp_path):
     store = Store(str(tmp_path / "api.db"))
     client = TestClient(create_app(store))
@@ -104,6 +127,14 @@ def test_api_overview_and_workload(report, tmp_path):
     assert ov["total"] == 12 and ov["summary"] == {"agent": 4, "llm": 4, "service": 4}
     assert ov["workloads"][0]["risk"]["tier"] == "high"
     assert "LLM03:2026 Excessive Agency" in ov["owasp"]
+    # Headline counts calls, not source rows: a Bedrock call seen three ways is one event.
+    rows = sum(r["n"] for r in ov["events_by_source"])
+    expected = len(
+        {e.call_id if e.action == "model_call" and e.call_id else e.id for e in report.audit_events}
+    )
+    assert ov["distinct_events"] == expected < rows
     wl = client.get("/api/workloads/invoice-agent").json()
     assert {e["source"] for e in wl["events"]} == {"cloudtrail", "bedrock-invocation-log"}
     assert client.get("/api/workloads/nope").status_code == 404
+    # A negative limit must not turn into "no limit" (SQLite) or a 500 (Postgres).
+    assert client.get("/api/events?limit=-1").json() == []

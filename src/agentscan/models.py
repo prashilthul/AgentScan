@@ -151,6 +151,9 @@ class AccountSnapshot(BaseModel):
     resources: list[Resource] = Field(default_factory=list)
     role_policies: dict[str, RolePolicy] = Field(default_factory=dict)
     trail_events: list[TrailEvent] = Field(default_factory=list)
+    # Regions where a trail's S3 delivery was read in full. LookupEvents is management-only and
+    # cannot see Bedrock data events, so it must not be used to prove a permission went unused.
+    cloudtrail_trail_regions: list[str] = Field(default_factory=list)
     invocations: list[InvocationRecord] = Field(default_factory=list)
     log_hits: list[LogHit] = Field(default_factory=list)
     log_calls: list[LogCall] = Field(default_factory=list)
@@ -246,7 +249,7 @@ class RiskFactor(BaseModel):
     key: str
     points: int
     why: str
-    owasp: list[str]  # OWASP Top 10 for LLM Applications 2025 ids
+    owasp: list[str]  # OWASP Top 10 for LLM Applications 2026 ids
     atlas: list[str]  # MITRE ATLAS technique ids
 
 

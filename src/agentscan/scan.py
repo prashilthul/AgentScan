@@ -6,9 +6,6 @@ from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from botocore.exceptions import BotoCoreError, ClientError
-from httpx import HTTPError
-
 from agentscan import __version__
 from agentscan.access import OPTIONAL_SOURCES, requests
 from agentscan.audit import normalise
@@ -33,8 +30,9 @@ def _run(snap: AccountSnapshot, name: str, fn: Callable[[], str | None]) -> None
     try:
         detail = fn() or ""
         snap.sources.append(SourceStatus(name=name, ok=True, detail=detail))
-    except (ClientError, BotoCoreError, HTTPError, OSError) as e:
-        snap.sources.append(SourceStatus(name=name, ok=False, detail=f"{type(e).__name__}: {e}"))
+    except Exception as e:  # noqa: BLE001 - one collector must not abort the whole crawl
+        detail = f"{type(e).__name__}: {e}"[:300]
+        snap.sources.append(SourceStatus(name=name, ok=False, detail=detail))
 
 
 def collect(

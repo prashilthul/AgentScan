@@ -49,6 +49,7 @@ export interface Overview {
   atlas: Record<string, number>;
   activity: Record<string, number>;
   events_by_source: { source: string; action: string; n: number }[];
+  distinct_events: number;
   coverage: { granted: string[]; missing: string[]; failed: string[] };
   access_requests: AccessRequest[];
   unclassified: { arn: string; type: string; region: string }[];

@@ -224,7 +224,11 @@ def _declared(b: _Builder, snap: AccountSnapshot) -> None:
 
 def _observed(b: _Builder, snap: AccountSnapshot, role_shared: bool) -> None:
     res = b.wl.primary
-    trail_ok = snap.source_ok("cloudtrail")
+    # LookupEvents covers management events only. It can support positive evidence, but it
+    # cannot prove a permission went unused: Bedrock model calls are data events.
+    trail_full = snap.source_ok("cloudtrail") and set(snap.regions) <= set(
+        snap.cloudtrail_trail_regions
+    )
 
     # CloudTrail: calls made BY this workload's role.
     mine = []
@@ -285,7 +289,7 @@ def _observed(b: _Builder, snap: AccountSnapshot, role_shared: bool) -> None:
         for s in ("iam.model_invoke", "iam.wildcard_ai", "iam.agent_invoke")
     )
     if (
-        trail_ok
+        trail_full
         and bedrock_perm
         and not model_calls
         and not agent_calls

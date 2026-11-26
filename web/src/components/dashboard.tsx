@@ -299,8 +299,8 @@ export default function Dashboard() {
         />
         <Stat
           title="Audit events recorded"
-          value={events}
-          note={`from ${Object.keys(bySource).length} sources, merged into one trail`}
+          value={data.distinct_events}
+          note={`${events} source records from ${Object.keys(bySource).length} sources, merged by call`}
         />
         <Stat
           title="Blind spots"
@@ -369,7 +369,7 @@ export default function Dashboard() {
                 {Object.entries(bySource).map(([s, n]) => (
                   <div key={s} className="flex justify-between">
                     <span>{SOURCE_TEXT[s] ?? s}</span>
-                    <span className="tabular-nums text-muted-foreground">{n} events</span>
+                    <span className="tabular-nums text-muted-foreground">{n} records</span>
                   </div>
                 ))}
                 <p className="pt-2 text-muted-foreground">
