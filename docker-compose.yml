@@ -3,16 +3,26 @@
 #   otel-collector  -> receives OTLP from the instrumented agents (like ADOT on AWS)
 #   jaeger          -> trace store the crawler queries (stands in for X-Ray)
 #   postgres        -> where agentscan keeps scans and the merged audit trail
+# State lives in named volumes, so it survives `make down` / `make up`. `make reset` wipes it.
 services:
   floci:
     image: floci/floci:latest
     ports: ["4566:4566"]
+    environment:
+      FLOCI_STORAGE_MODE: persistent
+    volumes: ["floci-data:/app/data"]
 
   jaeger:
     image: jaegertracing/all-in-one:1.62.0
     ports: ["16686:16686"]          # UI + query API
+    user: "0"                       # badger needs to write to the named volume
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: badger
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_KEY: /badger/key
+      BADGER_DIRECTORY_VALUE: /badger/data
+    volumes: ["jaeger-data:/badger"]
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.111.0
@@ -28,7 +38,13 @@ services:
       POSTGRES_USER: agentscan
       POSTGRES_PASSWORD: agentscan
       POSTGRES_DB: agentscan
+    volumes: ["pg-data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "agentscan"]
       interval: 2s
       retries: 15
+
+volumes:
+  floci-data:
+  jaeger-data:
+  pg-data:

@@ -1,8 +1,10 @@
-.PHONY: up down seed run scan approve-all eval web serve demo test lint
+.PHONY: up down reset seed run scan approve-all eval web serve demo test lint
 
 up:        ## start Floci (fake AWS), OTel collector + Jaeger, Postgres
 	docker compose up -d --wait
-down:
+down:      ## stop the stack; data stays in the named volumes
+	docker compose down
+reset:     ## stop the stack and wipe Floci, Jaeger and Postgres (then seed + run again)
 	docker compose down -v
 seed:      ## create the fake client account (resources, IAM, trail, log groups)
 	uv run python -m lab.seed

@@ -17,6 +17,9 @@ source, with a reason.
 | Postgres | 5433 | agentscan's own store | holds every scan and the merged audit trail |
 | Dashboard | 8000 | the report the client reads | `make serve`, then open http://127.0.0.1:8000 |
 
+Floci, Jaeger and Postgres keep their data in Docker volumes. `make down` keeps it. `make reset`
+deletes it.
+
 ## Commands
 
 You need Docker, [uv](https://docs.astral.sh/uv/) and a free Gemini key from
@@ -35,6 +38,7 @@ make eval                     # accuracy and confusion matrix against the ground
 uv run agentscan explain out/report.json invoice-agent   # every piece of evidence for one label
 make web && make serve        # build and serve the dashboard
 make test                     # offline test suite, no Docker or key needed
+make down                     # stop and keep the data; make reset stops and wipes it
 ```
 
 Useful flags on `agentscan scan`: `--disable traces` turns one approved source off to show what
